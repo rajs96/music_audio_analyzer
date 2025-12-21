@@ -50,6 +50,8 @@ class InstrumentDetectJobProducer:
             logger.info(f"Enqueuing job {detect_job.job_id} for filename {f.filename}")
             self.queue.enqueue.remote(detect_job)
 
+        return {"ok": True, "job_id": job_id}
+
 
 if __name__ == "__main__":
     # Start / connect Ray locally

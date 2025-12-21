@@ -10,3 +10,13 @@ class InstrumentDetectJob:
     song_hash: str
     audio_ref: ObjectRef
     filename: str
+
+
+class InstrumentDetectResult:
+    job_id: str
+    created_at: int
+    song_id: str
+    song_hash: str
+    audio_ref: ObjectRef
+    filename: str
+    result: list[str]
