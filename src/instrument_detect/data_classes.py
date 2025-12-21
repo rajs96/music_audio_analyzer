@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-import ray
+from ray._raylet import ObjectRef
 
 
 @dataclass
@@ -8,5 +8,5 @@ class InstrumentDetectJob:
     created_at: int
     song_id: str
     song_hash: str
-    audio_ref: ray.ObjectRef
+    audio_ref: ObjectRef
     filename: str
