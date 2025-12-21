@@ -20,7 +20,7 @@ if __name__ == "__main__":
 
     # Try uploading some files
     BASE_URL = "http://127.0.0.1:8000"
-    AUDIO_FILES_DIR = "../audio_files"
+    AUDIO_FILES_DIR = "./audio_files"
 
     # Get all files in the audio_files directory
     audio_dir = Path(AUDIO_FILES_DIR)
@@ -41,6 +41,8 @@ if __name__ == "__main__":
 
     # Upload
     response = requests.post(f"{BASE_URL}/v1/upload", files=files_list)
+    assert response.status_code == 200, "Upload should be successful"
+    assert response.json()["ok"] == True, "Upload should be successful"
 
     # Clean up
     for _, (_, file_handle, _) in files_list:
@@ -51,7 +53,12 @@ if __name__ == "__main__":
 
     # --- Measure queue size after ---
     after_size = ray.get(queue.size.remote())
-    logger.info(f"Queue size AFTER upload: {after_size}")
+    assert after_size == len(
+        audio_files
+    ), "Queue size after upload should be equal to the number of files uploaded"
+
+    results = ray.get(queue.peek.remote(n=len(audio_files)))
+    logger.info(f"Results: {results}")
 
     try:
         import time
@@ -61,3 +68,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("Shutting down...")
         serve.shutdown()
+        ray.shutdown()

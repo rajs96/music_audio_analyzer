@@ -29,7 +29,6 @@ class InstrumentDetectJobProducer:
         job_id = f"job_{uuid.uuid4().hex[:12]}"
         created_at = int(time.time())
 
-        songs = []
         for f in files:
             audio_bytes = await f.read()
             song_id = f"trk_{uuid.uuid4().hex[:12]}"
