@@ -122,16 +122,25 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Audio files (common formats)
+# Audio files (common formats) - but allow audio_files directory
 *.mp3
 *.wav
 *.flac
 *.aac
 *.ogg
-*.m4a
 *.wma
 *.mp4
 *.m4v
+# Negate audio file patterns for audio_files directory
+!audio_files/
+!audio_files/**/*.mp3
+!audio_files/**/*.wav
+!audio_files/**/*.flac
+!audio_files/**/*.aac
+!audio_files/**/*.ogg
+!audio_files/**/*.wma
+!audio_files/**/*.mp4
+!audio_files/**/*.m4v
 
 # IDE
 .vscode/
@@ -144,5 +153,6 @@ dmypy.json
 .DS_Store
 Thumbs.db
 
-audio_files/
+# Keep .cursor/ ignored (not needed in Docker)
 .cursor/
+

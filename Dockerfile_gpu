@@ -1,0 +1,28 @@
+# CUDA 12.8 + PyTorch already installed
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel
+
+# 1) Copy everything from local cwd into /app
+WORKDIR /app
+COPY . /app
+
+# 2) Install ffmpeg and build dependencies for flash-attn
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    ca-certificates \
+    git \
+    ninja-build \
+    build-essential \
+  && rm -rf /var/lib/apt/lists/*
+
+# 3) PyTorch is ALREADY installed (torch 2.9.1, CUDA 12.8)
+#    Just make sure pip is fresh
+RUN pip install --upgrade pip
+
+# 4) Install your local requirements file
+RUN pip install --no-cache-dir \
+    -r src/instrument_detect/instrument_detector/requirements.txt
+
+# 6) Default command: keep container alive (can be overridden in Kubernetes)
+# This allows the container to be used as an environment where you can exec commands
+CMD ["tail", "-f", "/dev/null"]
+

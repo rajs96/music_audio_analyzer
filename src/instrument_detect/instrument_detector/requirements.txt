@@ -7,4 +7,5 @@ safetensors
 torchcodec
 torchvision
 ray
+ray[serve]
 soundfile
