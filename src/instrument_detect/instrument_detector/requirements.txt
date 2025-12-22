@@ -1,0 +1,10 @@
+transformers
+torch
+torchaudio
+accelerate
+bitsandbytes
+safetensors
+torchcodec
+torchvision
+ray
+soundfile

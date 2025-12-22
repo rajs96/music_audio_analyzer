@@ -1,20 +1,21 @@
 import time
 from typing import List, Dict, Any
 import ray
-from src.instrument_detect.queue import Queue
+from src.instrument_detect.data_classes import InstrumentDetectJob
+from src.instrument_detect.instrument_detector.detector import InstrumentDetector
+from src.instrument_detect.job_queue import InstrumentDetectJobQueue
 
 
-@ray.remote(num_gpus=1)
-class QwenWorker:
+@ray.remote
+class InstrumentDetectConsumer:
     def __init__(
         self,
-        queue: Queue,
-        result_store,
+        queue: InstrumentDetectJobQueue,
+        worker: InstrumentDetector,
         batch_size: int = 8,
         max_wait_ms: int = 25,
     ):
         self.queue = queue
-        self.result_store = result_store
         self.batch_size = batch_size
         self.max_wait_ms = max_wait_ms
 
@@ -28,9 +29,9 @@ class QwenWorker:
     def run_forever(self):
         while True:
             # 1) pull an initial batch (blocks up to a little)
-            batch: List[Dict[str, Any]] = ray.get(
-                self.detect_queue.dequeue_batch.remote(
-                    max_items=self.batch_size, timeout_s=1.0
+            batch: List[InstrumentDetectJob] = ray.get(
+                self.queue.dequeue_many.remote(
+                    n=max(self.queue.size(), self.batch_size)
                 )
             )
             if not batch:
@@ -49,12 +50,12 @@ class QwenWorker:
                     break
                 batch.extend(extra)
 
-            # 3) resolve audio refs concurrently
-            audio_refs = [j["audio_ref"] for j in batch]
-            audio_bytes_list: List[bytes] = ray.get(audio_refs)
+            # # 3) resolve audio refs concurrently
+            # audio_refs = [j["audio_ref"] for j in batch]
+            # #audio_bytes_list: List[bytes] = ray.get(audio_refs)
 
-            # 4) run true batched inference
-            results = self._run_qwen_batch(audio_bytes_list)
+            # # 4) run true batched inference
+            # results = self._run_qwen_batch(audio_refs)
 
             # 5) bulk write results (one RPC per batch if possible)
             # Best: implement result_store.put_detection_batch([...])
@@ -71,4 +72,5 @@ class QwenWorker:
                     }
                 )
 
-            ray.get(self.result_store.put_detection_batch.remote(payload))
+
+# )
