@@ -1,44 +1,30 @@
 import ray
-from loguru import logger
-from src.instrument_detect.data_classes import InstrumentDetectJob
+from ray.util.queue import Queue
+
+
+def create_job_queue(max_size: int = 1000, name: str = "instrument_detect_queue") -> Queue:
+    """Create a Ray Queue for InstrumentDetectJob objects."""
+    return Queue(maxsize=max_size, actor_options={"name": name})
+
+
+def get_existing_queue(name: str = "instrument_detect_queue") -> Queue:
+    """Get an existing named queue."""
+    actor = ray.get_actor(name)
+    return Queue(actor=actor)
 
 
 @ray.remote
-class InstrumentDetectJobQueue:
-    def __init__(self, max_size: int = 1000):
-        self.q: list[InstrumentDetectJob] = []
-        self.max_size = max_size
+class QueueMonitor:
+    """Helper actor for debugging/inspecting the queue contents."""
 
-    def enqueue(self, job: InstrumentDetectJob):
-        if len(self.q) < self.max_size:
-            self.q.append(job)
-            return {"ok": True}
-        return {"ok": False, "error": "queue_full"}
-
-    def dequeue_many(self, n: int) -> list[InstrumentDetectJob]:
-        if not self.q:
-            return []
-        out = self.q[:n]
-        del self.q[:n]
-        return out
-
-    # -------- DEBUG / INSPECTION --------
+    def __init__(self, queue: Queue):
+        self.queue = queue
 
     def size(self) -> int:
-        return len(self.q)
+        return self.queue.qsize()
 
-    def peek(self, n: int = 5):
-        """
-        Return metadata for first n jobs without removing them.
-        DO NOT return audio_ref contents.
-        """
-        return [
-            {
-                "job_id": j.job_id,
-                "song_id": j.song_id,
-                "filename": j.filename,
-                "song_hash": j.song_hash,
-                "created_at": j.created_at,
-            }
-            for j in self.q[:n]
-        ]
+    def empty(self) -> bool:
+        return self.queue.empty()
+
+    def full(self) -> bool:
+        return self.queue.full()

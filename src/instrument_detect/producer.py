@@ -1,4 +1,5 @@
 from ray import serve
+from ray.util.queue import Queue
 import hashlib
 import ray
 import time
@@ -7,7 +8,7 @@ from loguru import logger
 from fastapi import FastAPI, UploadFile, File
 
 from src.instrument_detect.data_classes import InstrumentDetectJob
-from src.instrument_detect.job_queue import InstrumentDetectJobQueue
+from src.instrument_detect.job_queue import create_job_queue
 
 app = FastAPI()
 
@@ -17,7 +18,7 @@ app = FastAPI()
 class InstrumentDetectJobProducer:
     """Can upload files and create jobs to split files"""
 
-    def __init__(self, queue: InstrumentDetectJobQueue):
+    def __init__(self, queue: Queue):
         self.queue = queue
 
     @app.get("/v1/status")
@@ -47,7 +48,7 @@ class InstrumentDetectJobProducer:
                 filename=f.filename,
             )
             logger.info(f"Enqueuing job {detect_job.job_id} for filename {f.filename}")
-            self.queue.enqueue.remote(detect_job)
+            self.queue.put(detect_job)
 
         return {"ok": True, "job_id": job_id}
 
@@ -59,10 +60,8 @@ if __name__ == "__main__":
     # Start Serve (HTTP on :8000 by default)
     serve.start(detached=False)
 
-    # Create the queue actor
-    queue = InstrumentDetectJobQueue.options(name="instrument_detect_queue").remote(
-        max_size=1000
-    )
+    # Create the queue using ray.util.queue.Queue
+    queue = create_job_queue(max_size=1000)
 
     # Deploy the producer
     serve.run(InstrumentDetectJobProducer.bind(queue))
