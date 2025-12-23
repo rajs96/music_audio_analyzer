@@ -1,0 +1,46 @@
+# CUDA 12.8 + PyTorch already installed
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
+
+# -----------------------------
+# 0) Install SSH server + deps
+# -----------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-server \
+    ffmpeg \
+    ca-certificates \
+    git \
+    ninja-build \
+    build-essential \
+  && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------
+# 1) SSH setup (required)
+# -----------------------------
+RUN mkdir -p /var/run/sshd \
+    && mkdir -p /root/.ssh \
+    && chmod 700 /root/.ssh
+
+# Allow key-based root login (RunPod injects keys here)
+RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config \
+    && sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
+    && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+
+# -----------------------------
+# 2) Your app setup
+# -----------------------------
+WORKDIR /app
+COPY . /app
+
+RUN pip install --upgrade pip \
+ && pip install --no-cache-dir \
+    -r src/instrument_detect/instrument_detector/requirements.txt
+
+# -----------------------------
+# 3) Expose SSH port
+# -----------------------------
+EXPOSE 22
+
+# -----------------------------
+# 4) Start SSHD (keep container alive)
+# -----------------------------
+CMD ["/usr/sbin/sshd", "-D"]

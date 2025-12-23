@@ -1,11 +1,8 @@
 transformers
-torch
-torchaudio
 accelerate
 bitsandbytes
 safetensors
-torchcodec
-torchvision
 ray
 ray[serve]
 soundfile
+jupyter

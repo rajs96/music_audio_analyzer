@@ -1,5 +1,5 @@
 # CUDA 12.8 + PyTorch already installed
-FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
 
 # 1) Copy everything from local cwd into /app
 WORKDIR /app
