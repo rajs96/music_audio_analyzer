@@ -1,3 +1,5 @@
 loguru
 ray[serve]
 fastapi
+pillow
+transformers

@@ -6,3 +6,5 @@ ray
 ray[serve]
 soundfile
 jupyter
+pillow
+librosa

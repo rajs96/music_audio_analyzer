@@ -1,4 +1,3 @@
-import sys
 import ray
 import time
 from pathlib import Path

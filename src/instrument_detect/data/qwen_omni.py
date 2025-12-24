@@ -1,19 +1,19 @@
 from torch.utils.data import Dataset
 from pathlib import Path
-from transformers import AutoProcessor
+from transformers import Qwen3OmniMoeProcessor
 
 
 class QwenOmniDataset(Dataset):
-    def __init__(self, data_dir: str, processor: AutoProcessor):
+    def __init__(self, data_dir: str, processor: Qwen3OmniMoeProcessor):
         # get all files
-        self.files = [f for f in Path(data_dir).glob("**/*.mp3")]
+        self.files = [str(f) for f in Path(data_dir).glob("**/*.mp3")]
         self.processor = processor
 
     def __len__(self):
         return len(self.files)
 
-    def __getitem__(self, idx: int, slice: slice):
-        filenames = [self.files[idx] if isinstance(idx, int) else self.files[idx]]
+    def __getitem__(self, idx: int | slice):
+        filenames = [self.files[idx]] if isinstance(idx, int) else self.files[idx]
         conversations = []
         for filename in filenames:
             conversation_filename = []
