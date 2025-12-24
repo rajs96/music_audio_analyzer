@@ -8,3 +8,4 @@ soundfile
 jupyter
 pillow
 librosa
+torchcodec

@@ -55,7 +55,7 @@ build_runpods:
 	docker buildx build \
 		--platform linux/amd64 \
 		--no-cache \
-		-f Dockerfile_gpu_runpods \
+		-f Dockerfile_gpu_runpods_v2 \
 		-t $(RUNPODS_FULL_TAG) \
 		.
 
@@ -65,8 +65,11 @@ build_amd_runpods:
 	docker buildx build \
 		--platform linux/amd64 \
 		--no-cache \
-		-f Dockerfile_gpu_runpods \
+		-f Dockerfile_gpu_runpods_v2 \
 		-t $(AMD_RUNPODS_FULL_TAG) \
 		.
 
 	@echo "Built image: $(AMD_RUNPODS_FULL_TAG)"
+
+format:
+	black .
