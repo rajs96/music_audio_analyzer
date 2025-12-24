@@ -2,6 +2,7 @@ from torch.utils.data import Dataset
 from pathlib import Path
 from transformers import Qwen3OmniMoeProcessor
 import torchaudio
+import numpy as np
 
 
 class QwenOmniDataset(Dataset):
@@ -30,18 +31,18 @@ class QwenOmniDataset(Dataset):
                 wav, orig_freq=sr, new_freq=self.target_sr
             )
 
-        return wav.squeeze(0).numpy(), self.target_sr
+        return wav.squeeze(0).numpy()
 
     def __getitem__(self, idx: int | slice):
         filenames = [self.files[idx]] if isinstance(idx, int) else self.files[idx]
         conversations = []
 
         for filename in filenames:
-            waveform, sr = self.decode_audio(filename)
+            waveform = self.decode_audio(filename)
 
             conversation_filename = []
             conversation_filename.append(self.get_system_prompt())
-            conversation_filename.append(self.get_user_prompt(waveform, sr))
+            conversation_filename.append(self.get_user_prompt(waveform))
             conversations.append(conversation_filename)
 
         inputs = self.processor.apply_chat_template(
@@ -82,8 +83,8 @@ class QwenOmniDataset(Dataset):
             "content": [{"type": "text", "text": text}],
         }
 
-    def get_user_prompt(self, waveform, sample_rate: int):
+    def get_user_prompt(self, waveform: np.ndarray):
         return {
             "role": "user",
-            "content": [{"type": "audio", "audio": (waveform, sample_rate)}],
+            "content": [{"type": "audio", "audio": waveform}],
         }
