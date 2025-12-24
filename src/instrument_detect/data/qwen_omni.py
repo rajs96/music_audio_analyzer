@@ -1,24 +1,47 @@
 from torch.utils.data import Dataset
 from pathlib import Path
 from transformers import Qwen3OmniMoeProcessor
+import torchaudio
 
 
 class QwenOmniDataset(Dataset):
-    def __init__(self, data_dir: str, processor: Qwen3OmniMoeProcessor):
+    def __init__(
+        self, data_dir: str, processor: Qwen3OmniMoeProcessor, target_sr: int = 16000
+    ):
         # get all files
         self.files = [str(f) for f in Path(data_dir).glob("**/*.mp3")]
         self.processor = processor
+        self.target_sr = target_sr
 
     def __len__(self):
         return len(self.files)
 
+    def decode_audio(self, filepath: str) -> tuple:
+        """Decode audio file to waveform at target sample rate."""
+        wav, sr = torchaudio.load(filepath)
+
+        # Convert to mono
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+
+        # Resample to target_sr
+        if sr != self.target_sr:
+            wav = torchaudio.functional.resample(
+                wav, orig_freq=sr, new_freq=self.target_sr
+            )
+
+        return wav.squeeze(0).numpy(), self.target_sr
+
     def __getitem__(self, idx: int | slice):
         filenames = [self.files[idx]] if isinstance(idx, int) else self.files[idx]
         conversations = []
+
         for filename in filenames:
+            waveform, sr = self.decode_audio(filename)
+
             conversation_filename = []
             conversation_filename.append(self.get_system_prompt())
-            conversation_filename.append(self.get_user_prompt(filename))
+            conversation_filename.append(self.get_user_prompt(waveform, sr))
             conversations.append(conversation_filename)
 
         inputs = self.processor.apply_chat_template(
@@ -59,8 +82,8 @@ class QwenOmniDataset(Dataset):
             "content": [{"type": "text", "text": text}],
         }
 
-    def get_user_prompt(self, filename: str):
+    def get_user_prompt(self, waveform, sample_rate: int):
         return {
             "role": "user",
-            "content": [{"type": "audio", "audio": filename}],
+            "content": [{"type": "audio", "audio": (waveform, sample_rate)}],
         }
