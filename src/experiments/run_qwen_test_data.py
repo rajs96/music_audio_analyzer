@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import DataLoader
 from loguru import logger
 import time
+import os
 from src.instrument_detect.models.load_qwen import load_model_and_processor
 from src.instrument_detect.data.qwen_omni import QwenOmniDataset
 
@@ -9,7 +10,7 @@ from src.instrument_detect.data.qwen_omni import QwenOmniDataset
 def main():
     model_name = "Qwen/Qwen3-Omni-30B-A3B-Thinking"
     data_dir = "audio_files"
-    batch_size = 1
+    batch_size = 4
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     logger.info(f"Loading model: {model_name}")
@@ -25,7 +26,7 @@ def main():
     logger.info(f"Dataset size: {len(dataset)} files")
 
     # Create dataloader with prefetching and multiple workers
-    num_workers = 4  # Parallel audio decoding
+    num_workers = os.cpu_count()  # Parallel audio decoding
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
