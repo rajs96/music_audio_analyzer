@@ -87,13 +87,19 @@ def main():
 
     downloaded = 0
     skipped = 0
+    unknown = 0
 
     for item in tracks:
         track = item.get("track")
         if not track:
             continue
 
-        track_name = track.get("name", "Unknown")
+        track_name = track.get("name")
+        if not track_name:
+            print(f"  Skipping (no name): {track}")
+            unknown += 1
+            continue
+
         artists = ", ".join(artist["name"] for artist in track.get("artists", []))
         preview_url = track.get("preview_url")
 

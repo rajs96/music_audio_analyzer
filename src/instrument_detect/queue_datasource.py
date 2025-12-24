@@ -2,20 +2,19 @@ import ray.data as rd
 from ray.util.queue import Queue, Empty
 from typing import List
 from src.instrument_detect.data_classes import InstrumentDetectJob
+import time
 
 
 class QueueDatasource(rd.datasource.Datasource):
     def __init__(self, queue: Queue, pull_n: int = 128):
         self.queue = queue
-        self.pull_n = pull_n
 
-    def get_read_tasks(self, parallelism: int):
+    def get_read_tasks(
+        self, parallelism: int, pull_n: int = 128, idle_wait: float = 0.01
+    ):
         queue = self.queue
-        pull_n = self.pull_n
 
         def make_reader():
-            import time
-
             while True:
                 items: List[InstrumentDetectJob] = []
 
@@ -28,7 +27,7 @@ class QueueDatasource(rd.datasource.Datasource):
                         break
 
                 if not items:
-                    time.sleep(0.01)  # idle wait when queue is empty
+                    time.sleep(idle_wait)  # idle wait when queue is empty
                     continue
 
                 yield items

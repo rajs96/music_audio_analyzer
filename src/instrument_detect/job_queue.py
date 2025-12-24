@@ -2,7 +2,9 @@ import ray
 from ray.util.queue import Queue
 
 
-def create_job_queue(max_size: int = 1000, name: str = "instrument_detect_queue") -> Queue:
+def create_job_queue(
+    max_size: int = 1000, name: str = "instrument_detect_queue"
+) -> Queue:
     """Create a Ray Queue for InstrumentDetectJob objects."""
     return Queue(maxsize=max_size, actor_options={"name": name})
 
