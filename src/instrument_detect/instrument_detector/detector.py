@@ -9,7 +9,6 @@ from src.instrument_detect.data_classes import (
     InstrumentDetectJob,
     InstrumentDetectResult,
 )
-from src.instrument_detect.utils import load_model_and_processor
 
 
 class InstrumentDetector(ABC):

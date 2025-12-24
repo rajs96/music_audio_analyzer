@@ -1,4 +1,5 @@
-from ray import serve
+from pathlib import Path
+from ray import java_actor_class, serve
 from ray.util.queue import Queue
 import hashlib
 import ray
@@ -27,30 +28,72 @@ class InstrumentDetectJobProducer:
 
     @app.post("/v1/upload")
     async def upload(self, files: list[UploadFile] = File(...)):
-        job_id = f"job_{uuid.uuid4().hex[:12]}"
-        created_at = int(time.time())
-
+        job_info = self.get_job_info()
         for f in files:
             audio_bytes = await f.read()
-            song_id = f"trk_{uuid.uuid4().hex[:12]}"
-            song_hash = hashlib.sha256(audio_bytes).hexdigest()
+            song_info = self.get_metadata(audio_bytes)
 
             audio_ref = ray.put(
                 audio_bytes
             )  # store in ray object store of deployment, later s3
 
             detect_job = InstrumentDetectJob(
-                job_id=job_id,
-                created_at=created_at,
-                song_id=song_id,
-                song_hash=song_hash,
+                job_id=job_info["job_id"],
+                created_at=job_info["created_at"],
+                song_id=song_info["song_id"],
+                song_hash=song_info["song_hash"],
                 audio_ref=audio_ref,
                 filename=f.filename,
             )
             logger.info(f"Enqueuing job {detect_job.job_id} for filename {f.filename}")
             self.queue.put(detect_job)
 
-        return {"ok": True, "job_id": job_id}
+        return {"ok": True, "job_info": job_info["job_id"]}
+
+    async def add_from_filename(self, filename: str):
+        job_info = self.get_job_info()
+        audio_bytes = open(filename, "rb").read()
+        if not audio_bytes:
+            return {
+                "ok": False,
+                "error": "Failed to read audio file",
+                "job_info": job_info,
+            }
+
+        song_info = self.get_metadata(audio_bytes)
+
+        audio_ref = ray.put(
+            audio_bytes
+        )  # store in ray object store of deployment, later s3
+
+        detect_job = InstrumentDetectJob(
+            job_id=job_info["job_id"],
+            created_at=job_info["created_at"],
+            song_id=song_info["song_id"],
+            song_hash=song_info["song_hash"],
+            audio_ref=audio_ref,
+            filename=Path(filename).name,
+        )
+        logger.info(f"Enqueuing job {detect_job.job_id} for filename {filename}")
+        self.queue.put(detect_job)
+
+        return {"ok": True, "job_info": job_info["job_id"]}
+
+    def get_job_info(self):
+        job_id = f"job_{uuid.uuid4().hex[:12]}"
+        created_at = int(time.time())
+        return {
+            "job_id": job_id,
+            "created_at": created_at,
+        }
+
+    def get_metadata(self, audio_bytes: bytes):
+        song_id = f"trk_{uuid.uuid4().hex[:12]}"
+        song_hash = hashlib.sha256(audio_bytes).hexdigest()
+        return {
+            "song_id": song_id,
+            "song_hash": song_hash,
+        }
 
 
 if __name__ == "__main__":
