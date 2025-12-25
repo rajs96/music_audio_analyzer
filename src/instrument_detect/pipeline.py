@@ -5,7 +5,7 @@ import traceback
 import ray
 from ray.util.queue import Queue, Empty
 from loguru import logger
-from typing import Optional, List
+from typing import Optional, List, Callable
 
 from src.instrument_detect.data_classes import (
     InstrumentDetectJob,

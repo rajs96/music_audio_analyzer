@@ -1,4 +1,4 @@
-.PHONY: clean build build_amd push_image push_amd_image build_runpods build_amd_runpods push_runpods_image push_amd_runpods_image build_flash push_flash_image login
+.PHONY: clean clean_docker build build_amd push_image push_amd_image build_runpods build_amd_runpods push_runpods_image push_amd_runpods_image build_flash push_flash_image login
 
 # Docker image settings
 DOCKER_USER := rajs966
@@ -17,6 +17,10 @@ VLLM_FULL_TAG := $(VLLM_IMAGE_NAME):$(TS)
 clean:
 	find . -name '__pycache__' -type d -exec rm -rf {} +
 	find . -name '*.pyc' -type f -delete
+
+clean_docker:
+	docker system prune -af
+	docker rmi -f $$(docker images -q) 2>/dev/null || true
 
 login:
 	docker login
@@ -67,7 +71,7 @@ build_amd_runpods:
 	docker buildx build \
 		--platform linux/amd64 \
 		--no-cache \
-		-f Dockerfile_gpu_runpods_v2 \
+		-f Dockerfile_gpu_runpods_v2_a100 \
 		-t $(AMD_RUNPODS_FULL_TAG) \
 		.
 
@@ -77,7 +81,7 @@ build_vllm:
 	docker buildx build \
 		--platform linux/amd64 \
 		--no-cache \
-		-f Dockerfile_gpu_runpods_vllm \
+		-f Dockerfile_gpu_runpods_vllm_a100 \
 		-t $(VLLM_FULL_TAG) \
 		.
 

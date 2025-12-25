@@ -1,0 +1,13 @@
+transformers
+accelerate
+bitsandbytes
+safetensors
+ray
+ray[serve]
+soundfile
+jupyter
+pillow
+librosa
+torchcodec
+loguru
+vllm==0.5.1

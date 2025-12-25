@@ -41,16 +41,29 @@ def cache_model(model_name: str, cache_dir: str = DEFAULT_CACHE_DIR) -> str:
     logger.info(f"Downloading and caching model {model_name} to {cache_path}")
     cache_path.mkdir(parents=True, exist_ok=True)
 
+    # Load on CPU to avoid GPU memory issues
     logger.info("Loading model from HuggingFace...")
     model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         model_name,
         torch_dtype=torch.float32,
+        device_map="cpu",
     )
     processor = Qwen3OmniMoeProcessor.from_pretrained(model_name)
+
+    # Fix generation config conflicts before saving
+    # The model's default config has do_sample=False but sets temperature/top_p/top_k
+    if hasattr(model, "generation_config"):
+        model.generation_config.temperature = None
+        model.generation_config.top_p = None
+        model.generation_config.top_k = None
 
     logger.info(f"Saving model to {cache_path}")
     model.save_pretrained(cache_path)
     processor.save_pretrained(cache_path)
+
+    # Free memory
+    del model
+    del processor
 
     logger.info(f"Model cached successfully at {cache_path}")
     return str(cache_path)

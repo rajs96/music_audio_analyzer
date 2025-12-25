@@ -27,11 +27,20 @@ RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/
 # 2) Your app setup
 # -----------------------------
 WORKDIR /app
-COPY . /app
 
-RUN pip install --upgrade pip \
- && pip install --no-cache-dir \
-    -r src/instrument_detect/instrument_detector/requirements.txt
+# Copy only requirements first (better layer caching)
+COPY src/instrument_detect/instrument_detector/requirements.in /app/requirements.in
+
+# Install pip-tools, compile requirements (torch unpinned to keep base image version), then install
+RUN pip install --upgrade pip pip-tools \
+ && pip-compile requirements.in -o requirements.txt \
+    --unsafe-package torch \
+    --unsafe-package torchaudio \
+    --unsafe-package torchvision \
+ && pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the app
+COPY . /app
 
 
 # -----------------------------
