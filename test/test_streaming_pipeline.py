@@ -2,6 +2,8 @@
 Test script for streaming instrument detection pipeline.
 Jobs are added to the queue at random intervals while the pipeline is consuming.
 This simulates a real-time production environment.
+
+Uses the new StreamingPipeline framework with Agent-based components.
 """
 
 import ray
@@ -11,14 +13,26 @@ import random
 import torch
 from pathlib import Path
 from loguru import logger
-from ray.util.queue import Queue, Empty
+from ray.util.queue import Queue
 
-from src.instrument_detect.job_queue import create_job_queue
-from src.instrument_detect.pipeline import InstrumentDetectPipeline
-from src.instrument_detect.data_classes import InstrumentDetectJob
 import hashlib
 import uuid
 import threading
+
+from src.streaming_pipeline import (
+    AgentConfig,
+    AgentStage,
+    QueueStreamingDatasource,
+    StreamingDatasourceConfig,
+    StreamingPipeline,
+)
+from src.pipelines.instrument_detection.agents.audio_preprocessor import (
+    AudioPreprocessorAgent,
+)
+from src.pipelines.instrument_detection.agents.instrument_detector import (
+    InstrumentDetectorAgent,
+)
+from src.pipelines.instrument_detection.data_classes import InstrumentDetectJob
 
 # Map string names to torch dtypes
 DTYPE_MAP = {
@@ -59,7 +73,6 @@ def cache_model(model_name: str, cache_dir: str = DEFAULT_CACHE_DIR) -> str:
     processor = Qwen3OmniMoeProcessor.from_pretrained(model_name)
 
     # Fix generation config conflicts before saving
-    # The model's default config has do_sample=False but sets temperature/top_p/top_k
     if hasattr(model, "generation_config"):
         model.generation_config.temperature = None
         model.generation_config.top_p = None
@@ -95,6 +108,17 @@ def create_job_from_file(filepath: Path) -> InstrumentDetectJob:
         audio_ref=audio_ref,
         filename=filepath.name,
     )
+
+
+def job_to_row(job: InstrumentDetectJob) -> dict:
+    """Convert an InstrumentDetectJob to a row dict for the datasource."""
+    return {
+        "job_id": job.job_id,
+        "song_id": job.song_id,
+        "song_hash": job.song_hash,
+        "filename": job.filename,
+        "audio_ref": job.audio_ref,
+    }
 
 
 class StreamingJobProducer:
@@ -201,9 +225,12 @@ def main(
     burst_probability: float = 0.2,
     burst_size_min: int = 3,
     burst_size_max: int = 10,
+    # Datasource config
+    datasource_batch_size: int = 8,
+    datasource_parallelism: int = 1,
     # Preprocessor config
-    pool_size: int = 4,
-    dispatcher_batch_size: int = 8,
+    num_preprocessor_actors: int = 4,
+    preprocessor_batch_size: int = 8,
     preprocessor_num_cpus: float = 1.0,
     preprocessor_max_concurrency: int = 1,
     # Detector config
@@ -211,15 +238,10 @@ def main(
     detector_batch_size: int = 4,
     detector_num_gpus: float = 1.0,
     detector_max_concurrency: int = 1,
-    # Pipeline config
-    max_pending_tasks: int = 16,
-    max_waveform_queue_size: int = 50,
-    result_queue_size: int = 100,
+    # Model config
     model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Thinking",
-    # Cache config
     cache_dir: str = DEFAULT_CACHE_DIR,
     skip_cache: bool = False,
-    # Model dtype
     dtype: torch.dtype = torch.float32,
 ):
     # Cache model before initializing Ray
@@ -253,7 +275,7 @@ def main(
         logger.info(f"GPU check - Actor {i}: {r}")
 
     # Create job queue
-    job_queue = create_job_queue(max_size=1000)
+    job_queue = Queue(maxsize=1000)
     logger.info("Job queue created")
 
     # Get audio files
@@ -267,24 +289,50 @@ def main(
 
     logger.info(f"Found {len(audio_files)} audio files to sample from")
 
-    # Create pipeline
-    logger.info("Creating pipeline...")
-    pipeline = InstrumentDetectPipeline(
-        job_queue=job_queue,
-        pool_size=pool_size,
-        dispatcher_batch_size=dispatcher_batch_size,
-        detector_batch_size=detector_batch_size,
-        max_pending_tasks=max_pending_tasks,
-        max_waveform_queue_size=max_waveform_queue_size,
-        result_queue_size=result_queue_size,
-        model_name=model_path,
-        preprocessor_num_cpus=preprocessor_num_cpus,
-        preprocessor_max_concurrency=preprocessor_max_concurrency,
-        detector_num_gpus=detector_num_gpus,
-        detector_max_concurrency=detector_max_concurrency,
-        num_detector_actors=num_detector_actors,
-        dtype=dtype,
+    # Create the streaming datasource from the job queue
+    datasource = QueueStreamingDatasource(
+        queue=job_queue,
+        item_to_row_fn=job_to_row,
+        config=StreamingDatasourceConfig(
+            parallelism=datasource_parallelism,
+            batch_size=datasource_batch_size,
+            batch_timeout=0.1,
+            poll_interval=0.01,
+            max_items=total_jobs,  # Stop after processing all jobs
+        ),
     )
+    logger.info("StreamingDatasource created")
+
+    # Create agent stages
+    preprocessor_stage = AgentStage(
+        agent=AudioPreprocessorAgent(target_sr=16000),
+        config=AgentConfig(
+            num_actors=num_preprocessor_actors,
+            batch_size=preprocessor_batch_size,
+            num_cpus=preprocessor_num_cpus,
+            max_concurrency=preprocessor_max_concurrency,
+        ),
+        name="AudioPreprocessor",
+    )
+
+    detector_stage = AgentStage(
+        agent=InstrumentDetectorAgent(model_name=model_path, dtype=dtype),
+        config=AgentConfig(
+            num_actors=num_detector_actors,
+            batch_size=detector_batch_size,
+            num_gpus=detector_num_gpus,
+            max_concurrency=detector_max_concurrency,
+        ),
+        name="InstrumentDetector",
+    )
+
+    # Create the streaming pipeline
+    pipeline = StreamingPipeline(
+        datasource=datasource,
+        stages=[preprocessor_stage, detector_stage],
+        name="InstrumentDetectionPipeline",
+    )
+    logger.info("StreamingPipeline created")
 
     # Setup shutdown handling
     shutdown_requested = threading.Event()
@@ -293,30 +341,10 @@ def main(
         sig_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
         logger.info(f"Received {sig_name}, initiating shutdown...")
         shutdown_requested.set()
+        datasource.stop()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-
-    # Start pipeline FIRST (before adding any jobs)
-    logger.info("Starting pipeline...")
-    pipeline.start()
-
-    # Start result consumer thread
-    results = []
-    consumer_done = threading.Event()
-
-    def consume_results():
-        while not consumer_done.is_set():
-            try:
-                result = pipeline.result_queue.get(timeout=0.5)
-                results.append(result)
-                logger.info(f"Result: {result.filename} → {result.instruments}")
-            except Empty:
-                continue
-
-    consumer_thread = threading.Thread(target=consume_results, daemon=True)
-    consumer_thread.start()
-    logger.info("Result consumer started")
 
     # Create and start the streaming job producer
     producer = StreamingJobProducer(
@@ -333,104 +361,92 @@ def main(
     logger.info("Starting streaming job producer...")
     producer.start()
 
-    # Monitor progress
+    # Stream results from the pipeline
+    results = []
     start_time = time.time()
     last_log_time = start_time
 
+    logger.info("Starting to stream results from pipeline...")
+
     try:
-        while not shutdown_requested.is_set():
-            # Check for failures
-            error = pipeline.check_for_failures(timeout=0)
-            if error:
-                logger.error(f"Pipeline failure: {error}")
+        for batch in pipeline.stream(batch_size=1):
+            if shutdown_requested.is_set():
                 break
 
-            # Get stats
-            try:
-                stats = pipeline.get_stats()
-                job_size = stats["job_queue_size"]
-                waveform_size = stats["waveform_queue_size"]
-                result_size = stats["result_queue_size"]
-                dispatcher_stats = stats.get("dispatcher", {})
-                detector_stats = stats.get("detectors", [{}])
-            except Exception:
-                job_size = waveform_size = result_size = "?"
-                dispatcher_stats = {}
-                detector_stats = [{}]
+            # Extract results from the batch
+            # batch is a dict of columns, convert to list of dicts
+            if batch:
+                keys = list(batch.keys())
+                if keys:
+                    n_items = len(batch[keys[0]])
+                    for i in range(n_items):
+                        result = {k: batch[k][i] for k in keys}
+                        results.append(result)
 
-            # Log every second
+                        # Log result with error handling
+                        if result.get("error"):
+                            logger.warning(
+                                f"Result: {result['filename']} → ERROR: {result['error']}"
+                            )
+                        else:
+                            logger.info(
+                                f"Result: {result['filename']} → {result['instruments']}"
+                            )
+
+            # Log progress periodically
             if time.time() - last_log_time >= 1.0:
-                dispatched = dispatcher_stats.get("dispatched_count", "?")
-                pending = dispatcher_stats.get("pending_tasks", "?")
-                detected = sum(
-                    d.get("processed_count", 0)
-                    for d in detector_stats
-                    if isinstance(d, dict)
-                )
-
                 logger.info(
                     f"Progress: submitted={producer.jobs_submitted}/{total_jobs}, "
-                    f"jobs_queue={job_size}, waveforms={waveform_size}, results={result_size}, "
-                    f"dispatched={dispatched}, pending={pending}, detected={detected}, consumed={len(results)}"
+                    f"consumed={len(results)}"
                 )
                 last_log_time = time.time()
 
-            # Check if done (all jobs submitted AND all results received)
-            if producer.is_done() and len(results) >= total_jobs:
+            # Check if done
+            if len(results) >= total_jobs:
                 logger.info("All items processed!")
                 break
 
-            time.sleep(0.1)
-
     except KeyboardInterrupt:
         logger.info("Interrupted")
+    except Exception as e:
+        logger.error(f"Pipeline error: {e}")
+        import traceback
 
-    # Stop producer
+        traceback.print_exc()
+
+    # Stop producer and pipeline
     producer.stop()
-
-    # Stop consumer
-    consumer_done.set()
-    consumer_thread.join(timeout=2.0)
+    pipeline.stop()
 
     end_time = time.time()
     total_time = end_time - start_time
 
     # Final stats
+    successful = [r for r in results if not r.get("error")]
+    failed = [r for r in results if r.get("error")]
+
     logger.info("=" * 60)
     logger.info("STREAMING PIPELINE RESULTS")
     logger.info("=" * 60)
     logger.info(f"Total jobs submitted: {producer.jobs_submitted}")
     logger.info(f"Total results received: {len(results)}")
+    logger.info(f"  - Successful: {len(successful)}")
+    logger.info(f"  - Failed: {len(failed)}")
     logger.info(f"Total time: {total_time:.2f} seconds")
-    if len(results) > 0:
-        logger.info(f"Throughput: {len(results) / total_time:.2f} files/second")
-        logger.info(f"Avg time per file: {total_time / len(results):.2f} seconds")
-
-    # Detector timing metrics
-    try:
-        stats = pipeline.get_stats()
-        detector_stats = stats.get("detectors", [])
-        if detector_stats:
-            logger.info("\nDetector Inference Timing:")
-            for i, ds in enumerate(detector_stats):
-                if isinstance(ds, dict):
-                    logger.info(
-                        f"  Detector {i}: {ds.get('batch_count', 0)} batches, "
-                        f"{ds.get('processed_count', 0)} examples, "
-                        f"avg {ds.get('avg_batch_time_ms', 0):.1f}ms/batch, "
-                        f"{ds.get('avg_per_example_ms', 0):.1f}ms/example"
-                    )
-    except Exception as e:
-        logger.warning(f"Could not get detector timing stats: {e}")
+    if len(successful) > 0:
+        logger.info(f"Throughput: {len(successful) / total_time:.2f} files/second")
+        logger.info(f"Avg time per file: {total_time / len(successful):.2f} seconds")
 
     # Show sample results
     logger.info("\nSample results:")
-    for result in results[:5]:
-        logger.info(f"  - {result.filename}: {result.instruments}")
+    for result in successful[:5]:
+        logger.info(f"  - {result['filename']}: {result['instruments']}")
 
-    # Shutdown pipeline
-    logger.info("\nShutting down pipeline...")
-    pipeline.shutdown()
+    # Show errors if any
+    if failed:
+        logger.info("\nFailed items:")
+        for result in failed[:5]:
+            logger.info(f"  - {result['filename']}: {result['error']}")
 
     # Cleanup
     ray.shutdown()
@@ -460,12 +476,18 @@ if __name__ == "__main__":
     parser.add_argument("--burst-min", type=int, default=3, help="Min jobs in a burst")
     parser.add_argument("--burst-max", type=int, default=10, help="Max jobs in a burst")
 
+    # Datasource config
+    parser.add_argument("--ds-batch", type=int, default=8, help="Datasource batch size")
+    parser.add_argument(
+        "--ds-parallelism", type=int, default=1, help="Datasource parallelism"
+    )
+
     # Preprocessor config
     parser.add_argument(
-        "--pool-size", type=int, default=4, help="Number of preprocessor actors"
+        "--num-preprocessors", type=int, default=4, help="Number of preprocessor actors"
     )
     parser.add_argument(
-        "--dispatcher-batch", type=int, default=8, help="Dispatcher batch size"
+        "--prep-batch", type=int, default=8, help="Preprocessor batch size"
     )
     parser.add_argument(
         "--prep-cpus", type=float, default=1.0, help="CPUs per preprocessor"
@@ -494,16 +516,7 @@ if __name__ == "__main__":
         help="Max concurrency per detector",
     )
 
-    # Pipeline config
-    parser.add_argument(
-        "--max-pending", type=int, default=16, help="Max pending preprocessor tasks"
-    )
-    parser.add_argument(
-        "--max-waveform-queue", type=int, default=50, help="Max waveform queue size"
-    )
-    parser.add_argument(
-        "--result-queue-size", type=int, default=100, help="Result queue size"
-    )
+    # Model config
     parser.add_argument(
         "--model",
         type=str,
@@ -539,9 +552,10 @@ if __name__ == "__main__":
         f"""
 Streaming Pipeline Configuration:
   Producer: total_jobs={args.total_jobs}, delay={args.min_delay}-{args.max_delay}ms, burst_prob={args.burst_prob}, burst_size={args.burst_min}-{args.burst_max}
-  Preprocessor: pool_size={args.pool_size}, batch={args.dispatcher_batch}, cpus={args.prep_cpus}, concurrency={args.prep_concurrency}
+  Datasource: batch_size={args.ds_batch}, parallelism={args.ds_parallelism}
+  Preprocessor: num_actors={args.num_preprocessors}, batch={args.prep_batch}, cpus={args.prep_cpus}, concurrency={args.prep_concurrency}
   Detector: num_actors={args.num_detectors}, batch={args.detector_batch}, gpus={args.detector_gpus}, concurrency={args.detector_concurrency}
-  Pipeline: max_pending={args.max_pending}, max_waveform_queue={args.max_waveform_queue}, model={args.model}
+  Model: {args.model}
   Cache: dir={args.cache_dir}, skip_cache={args.skip_cache}
   Dtype: {args.dtype}
 """
@@ -554,17 +568,16 @@ Streaming Pipeline Configuration:
         burst_probability=args.burst_prob,
         burst_size_min=args.burst_min,
         burst_size_max=args.burst_max,
-        pool_size=args.pool_size,
-        dispatcher_batch_size=args.dispatcher_batch,
+        datasource_batch_size=args.ds_batch,
+        datasource_parallelism=args.ds_parallelism,
+        num_preprocessor_actors=args.num_preprocessors,
+        preprocessor_batch_size=args.prep_batch,
         preprocessor_num_cpus=args.prep_cpus,
         preprocessor_max_concurrency=args.prep_concurrency,
         num_detector_actors=args.num_detectors,
         detector_batch_size=args.detector_batch,
         detector_num_gpus=args.detector_gpus,
         detector_max_concurrency=args.detector_concurrency,
-        max_pending_tasks=args.max_pending,
-        max_waveform_queue_size=args.max_waveform_queue,
-        result_queue_size=args.result_queue_size,
         model_name=args.model,
         cache_dir=args.cache_dir,
         skip_cache=args.skip_cache,

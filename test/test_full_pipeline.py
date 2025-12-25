@@ -414,13 +414,13 @@ if __name__ == "__main__":
 
     # Pipeline config
     parser.add_argument(
-        "--max-pending", type=int, default=16, help="Max pending preprocessor tasks"
+        "--max-pending", type=int, default=500, help="Max pending preprocessor tasks"
     )
     parser.add_argument(
-        "--max-waveform-queue", type=int, default=50, help="Max waveform queue size"
+        "--max-waveform-queue", type=int, default=2000, help="Max waveform queue size"
     )
     parser.add_argument(
-        "--result-queue-size", type=int, default=100, help="Result queue size"
+        "--result-queue-size", type=int, default=2000, help="Result queue size"
     )
     parser.add_argument(
         "--model",
@@ -446,7 +446,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dtype",
         type=str,
-        default="float32",
+        default="bfloat16",
         choices=["float32", "float16", "bfloat16"],
         help="Model dtype (float32, float16, bfloat16)",
     )

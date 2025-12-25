@@ -3,8 +3,8 @@ from torch.utils.data import DataLoader
 from loguru import logger
 import time
 import os
-from src.instrument_detect.models.load_qwen import load_model_and_processor
-from src.instrument_detect.data.qwen_omni import QwenOmniDataset
+from src.pipelines.instrument_detection.models import load_model_and_processor
+from src.pipelines.instrument_detection.data import QwenOmniDataset
 
 
 def main():

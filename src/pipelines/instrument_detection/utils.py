@@ -2,7 +2,7 @@ import uuid
 import time
 import hashlib
 import ray
-from src.instrument_detect.data_classes import InstrumentDetectJob
+from .data_classes import InstrumentDetectJob
 from fastapi import UploadFile
 
 
