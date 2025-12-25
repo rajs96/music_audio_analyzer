@@ -9,3 +9,5 @@ jupyter
 pillow
 librosa
 torchcodec
+loguru
+vllm>=0.8.0

@@ -3,3 +3,6 @@ ray[serve]
 fastapi
 pillow
 transformers
+torchcodec
+torchaudio
+librosa
