@@ -29,13 +29,12 @@ RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/
 WORKDIR /app
 
 # Copy only requirements first (better layer caching)
-COPY src/instrument_detect/instrument_detector/requirements.in /app/requirements.in
+COPY src/pipelines/instrument_detection/requirements.in /app/requirements.in
 
-# Lock torch to base image version using constraints
+# Compile requirements, skipping torch resolution (already in base image from conda)
 RUN pip install --upgrade pip pip-tools \
- && pip freeze | grep -E "^torch==" > constraints.txt \
- && pip-compile requirements.in -o requirements.txt -c constraints.txt \
- && pip install --no-cache-dir -r requirements.txt -c constraints.txt
+ && pip-compile requirements.in -o requirements.txt --unsafe-package torch \
+ && pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the app
 COPY . /app
