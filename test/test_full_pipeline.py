@@ -18,6 +18,45 @@ import hashlib
 import uuid
 import threading
 
+# Default cache directory
+DEFAULT_CACHE_DIR = "/app/cache"
+
+
+def cache_model(model_name: str, cache_dir: str = DEFAULT_CACHE_DIR) -> str:
+    """
+    Download and cache the model locally using save_pretrained.
+    Returns the path to the cached model.
+    """
+    import torch
+    from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
+
+    # Create cache path from model name (replace / with _)
+    model_cache_name = model_name.replace("/", "_")
+    cache_path = Path(cache_dir) / model_cache_name
+
+    if cache_path.exists():
+        logger.info(f"Model already cached at {cache_path}")
+        return str(cache_path)
+
+    logger.info(f"Downloading and caching model {model_name} to {cache_path}")
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    # Load model and processor from HuggingFace
+    logger.info("Loading model from HuggingFace...")
+    model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+        model_name,
+        torch_dtype=torch.float32,
+    )
+    processor = Qwen3OmniMoeProcessor.from_pretrained(model_name)
+
+    # Save to cache
+    logger.info(f"Saving model to {cache_path}")
+    model.save_pretrained(cache_path)
+    processor.save_pretrained(cache_path)
+
+    logger.info(f"Model cached successfully at {cache_path}")
+    return str(cache_path)
+
 
 def create_job_from_file(filepath: Path) -> InstrumentDetectJob:
     """Create a job from a file path."""
@@ -100,7 +139,19 @@ def main(
     max_waveform_queue_size: int = 50,
     result_queue_size: int = 100,
     model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Thinking",
+    # Cache config
+    cache_dir: str = DEFAULT_CACHE_DIR,
+    skip_cache: bool = False,
 ):
+    # Cache model before initializing Ray (so it's available to all actors)
+    if not skip_cache:
+        logger.info("Caching model before starting pipeline...")
+        model_path = cache_model(model_name, cache_dir)
+        logger.info(f"Using cached model at: {model_path}")
+    else:
+        model_path = model_name
+        logger.info(f"Skipping cache, using model directly: {model_path}")
+
     # Initialize Ray
     ray.init(ignore_reinit_error=True)
     logger.info("Ray initialized")
@@ -132,7 +183,7 @@ def main(
         max_pending_tasks=max_pending_tasks,
         max_waveform_queue_size=max_waveform_queue_size,
         result_queue_size=result_queue_size,
-        model_name=model_name,
+        model_name=model_path,
         preprocessor_num_cpus=preprocessor_num_cpus,
         preprocessor_max_concurrency=preprocessor_max_concurrency,
         detector_num_gpus=detector_num_gpus,
@@ -338,6 +389,19 @@ if __name__ == "__main__":
         help="Model name",
     )
 
+    # Cache config
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default=DEFAULT_CACHE_DIR,
+        help="Directory to cache models",
+    )
+    parser.add_argument(
+        "--skip-cache",
+        action="store_true",
+        help="Skip caching and use model name directly",
+    )
+
     args = parser.parse_args()
 
     print(
@@ -347,6 +411,7 @@ Pipeline Configuration:
   Preprocessor: pool_size={args.pool_size}, batch={args.dispatcher_batch}, cpus={args.prep_cpus}, concurrency={args.prep_concurrency}
   Detector: num_actors={args.num_detectors}, batch={args.detector_batch}, gpus={args.detector_gpus}, concurrency={args.detector_concurrency}
   Pipeline: max_pending={args.max_pending}, max_waveform_queue={args.max_waveform_queue}, model={args.model}
+  Cache: dir={args.cache_dir}, skip_cache={args.skip_cache}
 """
     )
 
@@ -365,4 +430,6 @@ Pipeline Configuration:
         max_waveform_queue_size=args.max_waveform_queue,
         result_queue_size=args.result_queue_size,
         model_name=args.model,
+        cache_dir=args.cache_dir,
+        skip_cache=args.skip_cache,
     )

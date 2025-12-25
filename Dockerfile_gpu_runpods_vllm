@@ -1,6 +1,4 @@
-# CUDA 12.8 + PyTorch already installed
-FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel
-
+FROM pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime
 # -----------------------------
 # 0) Install SSH server + deps
 # -----------------------------
@@ -34,12 +32,15 @@ COPY . /app
 RUN pip install --upgrade pip \
  && pip install --no-cache-dir \
     -r src/instrument_detect/instrument_detector/requirements.txt
+
+# do this after
+RUN pip install vllm
 # -----------------------------
-# 3) Expose SSH port
+# 5) Expose SSH port
 # -----------------------------
 EXPOSE 22
 
 # -----------------------------
-# 4) Start SSHD (keep container alive)
+# 6) Start SSHD (keep container alive)
 # -----------------------------
 CMD ["/usr/sbin/sshd", "-D"]

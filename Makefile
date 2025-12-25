@@ -6,13 +6,13 @@ IMAGE_NAME := $(DOCKER_USER)/raj_audio_analyzer_gpu
 AMD_IMAGE_NAME := $(DOCKER_USER)/raj_audio_analyzer_gpu_amd
 RUNPODS_IMAGE_NAME := $(DOCKER_USER)/raj_audio_analyzer_gpu_runpods
 AMD_RUNPODS_IMAGE_NAME := $(DOCKER_USER)/raj_audio_analyzer_gpu_runpods_amd
-FLASH_IMAGE_NAME := $(DOCKER_USER)/raj_audio_analyzer_gpu_flash
+VLLM_IMAGE_NAME := $(DOCKER_USER)/raj_audio_analyzer_gpu_vllm
 TS := $(shell date +%Y%m%d_%H%M%S)
 FULL_TAG := $(IMAGE_NAME):$(TS)
 AMD_FULL_TAG := $(AMD_IMAGE_NAME):$(TS)
 RUNPODS_FULL_TAG := $(RUNPODS_IMAGE_NAME):$(TS)
 AMD_RUNPODS_FULL_TAG := $(AMD_RUNPODS_IMAGE_NAME):$(TS)
-FLASH_FULL_TAG := $(FLASH_IMAGE_NAME):$(TS)
+VLLM_FULL_TAG := $(VLLM_IMAGE_NAME):$(TS)
 
 clean:
 	find . -name '__pycache__' -type d -exec rm -rf {} +
@@ -73,18 +73,18 @@ build_amd_runpods:
 
 	@echo "Built image: $(AMD_RUNPODS_FULL_TAG)"
 
-build_flash:
+build_vllm:
 	docker buildx build \
 		--platform linux/amd64 \
 		--no-cache \
-		-f Dockerfile_gpu_runpods_flash \
-		-t $(FLASH_FULL_TAG) \
+		-f Dockerfile_gpu_runpods_vllm \
+		-t $(VLLM_FULL_TAG) \
 		.
 
-	@echo "Built image: $(FLASH_FULL_TAG)"
+	@echo "Built image: $(VLLM_FULL_TAG)"
 
-push_flash_image: login build_flash
-	docker push $(FLASH_FULL_TAG)
+push_vllm_image: login build_vllm
+	docker push $(VLLM_FULL_TAG)
 
 format:
 	black .
