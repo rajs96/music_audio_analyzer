@@ -34,12 +34,14 @@ class DetectorActor:
         model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Thinking",
         batch_size: int = 4,
         max_wait_ms: int = 100,
+        dtype: torch.dtype = torch.float32,
     ):
         self.input_queue = input_queue
         self.output_queue = output_queue
         self.model_name = model_name
         self.batch_size = batch_size
         self.max_wait_ms = max_wait_ms
+        self.dtype = dtype
         self.processed_count = 0
         self._error: Optional[str] = None
         self._stopped = False
@@ -51,9 +53,11 @@ class DetectorActor:
         # Load model on init
         try:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            logger.info(f"Loading model {model_name} on {self.device}")
+            logger.info(
+                f"Loading model {model_name} on {self.device} with dtype={dtype}"
+            )
             self.model, self.processor = load_model_and_processor(
-                model_name, self.device
+                model_name, dtype, self.device
             )
             self.model.eval()
             logger.info("Model loaded")
@@ -93,11 +97,12 @@ class DetectorActor:
         - synthesizer
         - strings
         - wind
-        - vocals
+        - lead_vocals
+        - backing_vocals
 
-        Example output 1: ['drums', 'electric_guitar', 'piano', 'vocals']
-        Example output 2: ['acoustic_guitar', 'piano', 'vocals', 'bass']
-        Example output 3: ['piano', 'vocals']
+        Example output 1: ['drums', 'electric_guitar', 'piano', 'lead_vocals']
+        Example output 2: ['acoustic_guitar', 'piano', 'backing_vocals', 'bass']
+        Example output 3: ['piano', 'lead_vocals']
         """
         return {
             "role": "system",
@@ -141,10 +146,17 @@ class DetectorActor:
         """Run inference on a batch of preprocessed audio."""
         waveforms = [item.waveform for item in batch]
 
-        # Tokenize
+        # Tokenize and move to device with correct dtype
         inputs = self.tokenize(waveforms)
         inputs = {
-            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+            k: (
+                v.to(
+                    device=self.device,
+                    dtype=self.dtype if v.is_floating_point() else None,
+                )
+                if isinstance(v, torch.Tensor)
+                else v
+            )
             for k, v in inputs.items()
         }
 

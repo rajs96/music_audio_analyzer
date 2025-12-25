@@ -1,5 +1,5 @@
 transformers
-accelerate
+accelerate>=-.26.0
 bitsandbytes
 safetensors
 ray

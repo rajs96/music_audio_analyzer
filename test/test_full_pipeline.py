@@ -7,6 +7,7 @@ import ray
 import time
 import signal
 import sys
+import torch
 from pathlib import Path
 from loguru import logger
 from ray.util.queue import Queue, Empty
@@ -17,6 +18,13 @@ from src.instrument_detect.data_classes import InstrumentDetectJob
 import hashlib
 import uuid
 import threading
+
+# Map string names to torch dtypes
+DTYPE_MAP = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
 
 # Default cache directory
 DEFAULT_CACHE_DIR = "/app/cache"
@@ -154,6 +162,8 @@ def main(
     # Cache config
     cache_dir: str = DEFAULT_CACHE_DIR,
     skip_cache: bool = False,
+    # Model dtype
+    dtype: torch.dtype = torch.float32,
 ):
     # Cache model before initializing Ray (so it's available to all actors)
     if not skip_cache:
@@ -167,6 +177,23 @@ def main(
     # Initialize Ray
     ray.init(ignore_reinit_error=True)
     logger.info("Ray initialized")
+
+    # Verify GPU allocation works correctly
+    @ray.remote(num_gpus=1)
+    def check_gpu():
+        import os
+        import torch
+
+        return {
+            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "device_count": torch.cuda.device_count(),
+        }
+
+    logger.info("Checking GPU allocation...")
+    gpu_tasks = [check_gpu.remote() for _ in range(num_detector_actors)]
+    gpu_results = ray.get(gpu_tasks)
+    for i, r in enumerate(gpu_results):
+        logger.info(f"GPU check - Actor {i}: {r}")
 
     # Create job queue
     job_queue = create_job_queue(max_size=queue_multiplier * 1000)
@@ -186,7 +213,7 @@ def main(
     logger.info(f"Job queue size: {job_queue.qsize()}")
 
     # Create pipeline
-    logger.info("Creating pipeline...")
+    logger.info(f"Creating pipeline with dtype={dtype}...")
     pipeline = InstrumentDetectPipeline(
         job_queue=job_queue,
         pool_size=pool_size,
@@ -201,6 +228,7 @@ def main(
         detector_num_gpus=detector_num_gpus,
         detector_max_concurrency=detector_max_concurrency,
         num_detector_actors=num_detector_actors,
+        dtype=dtype,
     )
 
     # Setup shutdown handling
@@ -414,6 +442,15 @@ if __name__ == "__main__":
         help="Skip caching and use model name directly",
     )
 
+    # Model dtype
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="float32",
+        choices=["float32", "float16", "bfloat16"],
+        help="Model dtype (float32, float16, bfloat16)",
+    )
+
     args = parser.parse_args()
 
     print(
@@ -424,6 +461,7 @@ Pipeline Configuration:
   Detector: num_actors={args.num_detectors}, batch={args.detector_batch}, gpus={args.detector_gpus}, concurrency={args.detector_concurrency}
   Pipeline: max_pending={args.max_pending}, max_waveform_queue={args.max_waveform_queue}, model={args.model}
   Cache: dir={args.cache_dir}, skip_cache={args.skip_cache}
+  Dtype: {args.dtype}
 """
     )
 
@@ -444,4 +482,5 @@ Pipeline Configuration:
         model_name=args.model,
         cache_dir=args.cache_dir,
         skip_cache=args.skip_cache,
+        dtype=DTYPE_MAP[args.dtype],
     )

@@ -3,6 +3,7 @@ import sys
 import time
 import traceback
 import ray
+import torch
 from ray.util.queue import Queue, Empty
 from loguru import logger
 from typing import Optional, List, Callable
@@ -264,6 +265,8 @@ class InstrumentDetectPipeline:
         detector_num_gpus: float = 1.0,
         detector_max_concurrency: int = 1,
         num_detector_actors: int = 1,
+        # Model dtype
+        dtype: torch.dtype = torch.float32,
     ):
         self.job_queue = job_queue
         self.pool_size = pool_size
@@ -277,6 +280,7 @@ class InstrumentDetectPipeline:
         self.detector_num_gpus = detector_num_gpus
         self.detector_max_concurrency = detector_max_concurrency
         self.num_detector_actors = num_detector_actors
+        self.dtype = dtype
 
         # Create intermediate queues
         self.waveform_queue = Queue(maxsize=max_waveform_queue_size)
@@ -325,6 +329,7 @@ class InstrumentDetectPipeline:
                 output_queue=self.result_queue,
                 model_name=self.model_name,
                 batch_size=self.detector_batch_size,
+                dtype=self.dtype,
             )
             self.detectors.append(detector)
             self._detector_tasks.append(detector.run_forever.remote())
