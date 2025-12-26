@@ -31,10 +31,11 @@ WORKDIR /app
 # Copy only requirements first (better layer caching)
 COPY src/pipelines/instrument_detection/requirements.in /app/requirements.in
 
-# Compile requirements, skipping torch resolution (already in base image from conda)
+# Don't override base image torch, torchaudio, torchvision, triton
 RUN pip install --upgrade pip pip-tools \
- && pip-compile requirements.in -o requirements.txt --unsafe-package torch \
- && pip install --no-cache-dir -r requirements.txt
+ && pip-compile requirements.in -o requirements.txt \
+ && grep -vE "^(nvidia-|torch==|torchaudio==|torchvision==|triton==)" requirements.txt > requirements-clean.txt \
+ && pip install --no-cache-dir -r requirements-clean.txt
 
 # Copy the rest of the app
 COPY . /app

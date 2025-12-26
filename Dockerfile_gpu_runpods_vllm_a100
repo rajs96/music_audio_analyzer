@@ -31,11 +31,12 @@ WORKDIR /app
 # Copy only requirements first (better layer caching)
 COPY src/pipelines/instrument_detection/requirements_vllm.in /app/requirements_vllm.in
 
-# Lock torch to base image version using constraints
+# Compile requirements, strip torch/nvidia, constrain to base image torch version
 RUN pip install --upgrade pip pip-tools \
- && pip freeze | grep -E "^torch==" > constraints.txt \
- && pip-compile requirements_vllm.in -o requirements_vllm.txt -c constraints.txt \
- && pip install --no-cache-dir -r requirements_vllm.txt -c constraints.txt
+ && pip freeze | grep -E "^(torch|torchaudio|torchvision)==" > /tmp/torch-constraints.txt \
+ && pip-compile requirements_vllm.in -o requirements_vllm.txt \
+ && grep -vE "^(nvidia-|torch==|torchaudio==|torchvision==|triton==)" requirements_vllm.txt > requirements_vllm-clean.txt \
+ && pip install --no-cache-dir -r requirements_vllm-clean.txt -c /tmp/torch-constraints.txt
 
 # Copy the rest of the app
 COPY . /app

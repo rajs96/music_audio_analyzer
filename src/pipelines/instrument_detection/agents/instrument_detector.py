@@ -43,7 +43,7 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
     def __init__(
         self,
         model_name: str = "Qwen/Qwen2-Audio-7B-Instruct",
-        dtype: torch.dtype = torch.float32,
+        dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
         self.model_name = model_name

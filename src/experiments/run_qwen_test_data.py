@@ -3,6 +3,8 @@ from torch.utils.data import DataLoader
 from loguru import logger
 import time
 import os
+from pathlib import Path
+import pandas as pd
 from src.pipelines.instrument_detection.models import load_model_and_processor
 from src.pipelines.instrument_detection.data import QwenOmniDataset
 
@@ -10,14 +12,18 @@ from src.pipelines.instrument_detection.data import QwenOmniDataset
 def main():
     model_name = "Qwen/Qwen3-Omni-30B-A3B-Thinking"
     data_dir = "audio_files"
+    results_dir = Path("/app/results").resolve()
+    results_dir.mkdir(parents=True, exist_ok=True)
     batch_size = 4
+    dtype = torch.bfloat16
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    results = []
 
     logger.info(f"Loading model: {model_name}")
     logger.info(f"Device: {device}")
 
     # Load model and processor
-    model, processor = load_model_and_processor(model_name, device)
+    model, processor = load_model_and_processor(model_name, dtype, device)
     model.eval()
     logger.info("Model loaded")
 
@@ -38,11 +44,10 @@ def main():
     )
     logger.info(f"DataLoader: {num_workers} workers, prefetch_factor=2")
 
-    results = []
-
     start_time = time.time()
     with torch.no_grad():
-        for batch_idx, inputs in enumerate(dataloader):
+        for batch_idx, (filenames, inputs) in enumerate(dataloader):
+
             logger.info(f"Processing batch {batch_idx + 1}/{len(dataloader)}")
 
             # Move inputs to device
@@ -63,8 +68,18 @@ def main():
             response = processor.batch_decode(generated_ids, skip_special_tokens=True)
 
             logger.info(f"Response: {response}")
-            results.append(response)
+            for filename, response in zip(filenames, response):
+                song_name = filename.split("/")[-1].split(".")[0]
+                results.append(
+                    {
+                        "filename": filename,
+                        "song_name": song_name,
+                        "response": response,
+                    }
+                )
 
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(results_dir / "results.csv", index=False)
     end_time = time.time()
     logger.info(f"Time taken: {end_time - start_time} seconds")
     logger.info(
@@ -72,10 +87,10 @@ def main():
     )
 
     logger.info("--- All Results ---")
-    for i, result in enumerate(results):
-        logger.info(f"File {i + 1}: {result}")
+    for result in results.iterrows():
+        logger.info(f"Song {result.song_name}: {result.response}")
 
-    return results
+    logger.info(results_df.head(20))
 
 
 if __name__ == "__main__":

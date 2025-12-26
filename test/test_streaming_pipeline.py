@@ -33,6 +33,7 @@ from src.pipelines.instrument_detection.agents.instrument_detector import (
     InstrumentDetectorAgent,
 )
 from src.pipelines.instrument_detection.data_classes import InstrumentDetectJob
+from src.pipelines.instrument_detection.models import load_model_and_processor
 
 # Map string names to torch dtypes
 DTYPE_MAP = {
@@ -45,7 +46,9 @@ DTYPE_MAP = {
 DEFAULT_CACHE_DIR = "/app/cache"
 
 
-def cache_model(model_name: str, cache_dir: str = DEFAULT_CACHE_DIR) -> str:
+def cache_model(
+    model_name: str, dtype: torch.dtype, cache_dir: str = DEFAULT_CACHE_DIR
+) -> str:
     """
     Download and cache the model locally using save_pretrained.
     Returns the path to the cached model.
@@ -65,12 +68,7 @@ def cache_model(model_name: str, cache_dir: str = DEFAULT_CACHE_DIR) -> str:
 
     # Load on CPU to avoid GPU memory issues
     logger.info("Loading model from HuggingFace...")
-    model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-        model_name,
-        torch_dtype=torch.float32,
-        device_map="cpu",
-    )
-    processor = Qwen3OmniMoeProcessor.from_pretrained(model_name)
+    model, processor = load_model_and_processor(model_name, dtype, "cpu")
 
     # Fix generation config conflicts before saving
     if hasattr(model, "generation_config"):
@@ -242,12 +240,12 @@ def main(
     model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Thinking",
     cache_dir: str = DEFAULT_CACHE_DIR,
     skip_cache: bool = False,
-    dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype = torch.bfloat16,
 ):
     # Cache model before initializing Ray
     if not skip_cache:
         logger.info("Caching model before starting pipeline...")
-        model_path = cache_model(model_name, cache_dir)
+        model_path = cache_model(model_name, dtype, cache_dir)
         logger.info(f"Using cached model at: {model_path}")
     else:
         model_path = model_name
