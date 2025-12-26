@@ -52,7 +52,7 @@ class QwenOmniDataset(Dataset):
             return_tensors="pt",
             return_dict=True,
         )
-        return inputs
+        return filenames, inputs
 
     def get_system_prompt(self):
         text = """
