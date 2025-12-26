@@ -19,7 +19,7 @@ def load_model_and_processor(model_name: str, dtype: torch.dtype, device: str):
     # then manually move to device
     model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         model_name,
-        torch_dtype=dtype,
+        dtype=dtype,
     )
     model = model.to(device)
     processor = Qwen3OmniMoeProcessor.from_pretrained(model_name)

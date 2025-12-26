@@ -13,6 +13,7 @@ def main():
     model_name = "Qwen/Qwen3-Omni-30B-A3B-Thinking"
     data_dir = "audio_files"
     results_dir = Path("/app/results").resolve()
+    logger.info(f"Results directory: {results_dir}")
     results_dir.mkdir(parents=True, exist_ok=True)
     batch_size = 4
     dtype = torch.bfloat16
@@ -52,7 +53,7 @@ def main():
 
             # Move inputs to device
             inputs = {
-                k: v.to(device) if isinstance(v, torch.Tensor) else v
+                k: v.to(device).to(dtype) if isinstance(v, torch.Tensor) else v
                 for k, v in inputs.items()
             }
 
