@@ -187,7 +187,9 @@ class StreamingDatasource(rd.datasource.Datasource, ABC, Generic[T]):
         """Check if stop has been requested."""
         return self._stop_event.is_set()
 
-    def get_read_tasks(self, parallelism: int) -> List[rd.datasource.ReadTask]:
+    def prepare_read(
+        self, parallelism: int, **read_args
+    ) -> List[rd.datasource.ReadTask]:
         """
         Create read tasks for Ray Data.
 
@@ -274,13 +276,14 @@ class StreamingDatasource(rd.datasource.Datasource, ABC, Generic[T]):
             )
 
         # Create read tasks
+        from ray.data.block import BlockMetadata
+
         return [
             rd.datasource.ReadTask(
                 read_fn=make_block_generator,
-                metadata=rd.datasource.datasource.BlockMetadata(
+                metadata=BlockMetadata(
                     num_rows=None,  # Unknown - streaming
                     size_bytes=None,  # Unknown - streaming
-                    schema=None,  # Will be inferred from first block
                     input_files=None,
                     exec_stats=None,
                 ),

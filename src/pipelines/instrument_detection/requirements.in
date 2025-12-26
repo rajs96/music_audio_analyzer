@@ -12,3 +12,4 @@ pillow
 librosa
 torchcodec
 loguru
+python-multipart
