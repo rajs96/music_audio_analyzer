@@ -141,6 +141,7 @@ class StreamingDatasource(rd.datasource.Datasource, ABC, Generic[T]):
     """
 
     def __init__(self, config: Optional[StreamingDatasourceConfig] = None):
+        super().__init__()  # Initialize base Datasource and mixins
         self.config = config or StreamingDatasourceConfig()
         self._stop_event = threading.Event()
         self._items_read = 0
@@ -187,9 +188,16 @@ class StreamingDatasource(rd.datasource.Datasource, ABC, Generic[T]):
         """Check if stop has been requested."""
         return self._stop_event.is_set()
 
-    def prepare_read(
-        self, parallelism: int, **read_args
-    ) -> List[rd.datasource.ReadTask]:
+    def estimate_inmemory_data_size(self) -> Optional[int]:
+        """Return estimated in-memory size, None for streaming (unknown)."""
+        return None
+
+    def get_read_tasks(
+        self,
+        parallelism: int,
+        per_task_row_limit: Optional[int] = None,
+        data_context=None,
+    ) -> List["rd.datasource.ReadTask"]:
         """
         Create read tasks for Ray Data.
 
@@ -275,18 +283,22 @@ class StreamingDatasource(rd.datasource.Datasource, ABC, Generic[T]):
                 f"StreamingDatasource reader exiting, read {self._items_read} items"
             )
 
-        # Create read tasks
+        # Create read tasks with minimal metadata for streaming
         from ray.data.block import BlockMetadata
+        from ray.data.datasource import ReadTask
+
+        metadata = BlockMetadata(
+            num_rows=None,
+            size_bytes=None,
+            input_files=None,
+            exec_stats=None,
+        )
 
         return [
-            rd.datasource.ReadTask(
+            ReadTask(
                 read_fn=make_block_generator,
-                metadata=BlockMetadata(
-                    num_rows=None,  # Unknown - streaming
-                    size_bytes=None,  # Unknown - streaming
-                    input_files=None,
-                    exec_stats=None,
-                ),
+                metadata=metadata,
+                per_task_row_limit=per_task_row_limit,
             )
             for _ in range(actual_parallelism)
         ]
