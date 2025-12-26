@@ -11,7 +11,7 @@ from ray.util.queue import Queue
 from src.streaming_pipeline import (
     QueueStreamingDatasource,
     StreamingDatasourceConfig,
-    AgentConfig,
+    AgentRayComputeConfig,
     AgentStage,
     StreamingPipeline,
 )
@@ -101,7 +101,7 @@ def create_pipeline(
         # Stage 1: Preprocessing (CPU-bound, parallelizable)
         AgentStage(
             agent=AudioPreprocessorAgent(target_sr=16000),
-            config=AgentConfig(
+            config=AgentRayComputeConfig(
                 num_actors=num_preprocessors,
                 batch_size=preprocessor_batch_size,
                 num_cpus=preprocessor_num_cpus,
@@ -112,7 +112,7 @@ def create_pipeline(
         # Stage 2: Detection (GPU-bound)
         AgentStage(
             agent=InstrumentDetectorAgent(model_name=model_name),
-            config=AgentConfig(
+            config=AgentRayComputeConfig(
                 num_actors=num_detectors,
                 batch_size=detector_batch_size,
                 num_cpus=1.0,

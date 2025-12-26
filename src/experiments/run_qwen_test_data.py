@@ -52,10 +52,15 @@ def main():
             logger.info(f"Processing batch {batch_idx + 1}/{len(dataloader)}")
 
             # Move inputs to device
-            inputs = {
-                k: v.to(device).to(dtype) if isinstance(v, torch.Tensor) else v
-                for k, v in inputs.items()
-            }
+            inputs = {}
+            for k, v in inputs.items():
+                if isinstance(v, torch.Tensor):
+                    if v.is_floating_point():
+                        inputs[k] = v.to(device).to(dtype)
+                    else:
+                        inputs[k] = v.to(device)
+                else:
+                    inputs[k] = v
 
             # Generate
             output_ids = model.generate(

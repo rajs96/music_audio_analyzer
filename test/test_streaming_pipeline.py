@@ -22,7 +22,7 @@ import uuid
 import threading
 
 from src.streaming_pipeline import (
-    AgentConfig,
+    AgentRayComputeConfig,
     AgentStage,
     QueueStreamingDatasource,
     StreamingDatasourceConfig,
@@ -307,7 +307,7 @@ def main(
     # Create agent stages
     preprocessor_stage = AgentStage(
         agent=AudioPreprocessorAgent(target_sr=16000),
-        config=AgentConfig(
+        config=AgentRayComputeConfig(
             num_actors=num_preprocessor_actors,
             batch_size=preprocessor_batch_size,
             num_cpus=preprocessor_num_cpus,
@@ -318,7 +318,7 @@ def main(
 
     detector_stage = AgentStage(
         agent=InstrumentDetectorAgent(model_name=model_path, dtype=dtype),
-        config=AgentConfig(
+        config=AgentRayComputeConfig(
             num_actors=num_detector_actors,
             batch_size=detector_batch_size,
             num_gpus=detector_num_gpus,

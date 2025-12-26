@@ -10,7 +10,7 @@ The recommended pattern is to use Agent + AgentStage:
     pipeline = StreamingPipeline(
         datasource=my_datasource,
         stages=[
-            AgentStage(MyAgent(), AgentConfig(num_actors=4)),
+            AgentStage(MyAgent(), AgentRayComputeConfig(num_actors=4)),
         ]
     )
 """
@@ -39,7 +39,7 @@ class StreamingPipeline:
             StreamingPipeline,
             QueueStreamingDatasource,
             AgentStage,
-            AgentConfig,
+            AgentRayComputeConfig,
         )
         from my_agents import AudioDecoder, InstrumentDetector
 
@@ -51,8 +51,8 @@ class StreamingPipeline:
 
         # Create agent stages
         stages = [
-            AgentStage(AudioDecoder(), AgentConfig(num_actors=4)),
-            AgentStage(InstrumentDetector(), AgentConfig(num_actors=1, num_gpus=1)),
+            AgentStage(AudioDecoder(), AgentRayComputeConfig(num_actors=4)),
+            AgentStage(InstrumentDetector(), AgentRayComputeConfig(num_actors=1, num_gpus=1)),
         ]
 
         # Create and run pipeline

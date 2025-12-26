@@ -16,7 +16,7 @@ Key concepts:
 Example:
     from streaming_pipeline import (
         Agent,
-        AgentConfig,
+        AgentRayComputeConfig,
         AgentStage,
         QueueStreamingDatasource,
         StreamingDatasourceConfig,
@@ -43,7 +43,7 @@ Example:
     pipeline = StreamingPipeline(
         datasource=datasource,
         stages=[
-            AgentStage(MyProcessor(multiplier=3), AgentConfig(num_actors=4)),
+            AgentStage(MyProcessor(multiplier=3), AgentRayComputeConfig(num_actors=4)),
         ]
     )
 
@@ -63,7 +63,7 @@ from .streaming_datasource import (
 
 from .agent import (
     Agent,
-    AgentConfig,
+    AgentRayComputeConfig,
     AgentStage,
     BatchFormat,
     FunctionAgent,
@@ -83,7 +83,7 @@ __all__ = [
     "QueueStreamingDatasource",
     # Agent
     "Agent",
-    "AgentConfig",
+    "AgentRayComputeConfig",
     "AgentStage",
     "BatchFormat",
     "FunctionAgent",

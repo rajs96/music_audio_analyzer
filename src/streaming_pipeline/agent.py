@@ -23,8 +23,8 @@ TOutput = TypeVar("TOutput")
 
 
 @dataclass
-class AgentConfig:
-    """Configuration for how an Agent is deployed in a pipeline."""
+class AgentRayComputeConfig:
+    """Configuration for Ray compute resources and scaling of an Agent."""
 
     # Number of actor replicas
     num_actors: int = 1
@@ -71,7 +71,7 @@ class Agent(ABC, Generic[TInput, TOutput]):
         pipeline = StreamingPipeline(
             datasource=my_datasource,
             stages=[
-                AgentStage(AudioDecoder(sample_rate=16000), AgentConfig(num_actors=4)),
+                AgentStage(AudioDecoder(sample_rate=16000), AgentRayComputeConfig(num_actors=4)),
             ]
         )
     """
@@ -205,13 +205,13 @@ class AgentStage:
     Example:
         stage = AgentStage(
             agent=MyProcessor(),
-            config=AgentConfig(num_actors=4, num_gpus=1),
+            config=AgentRayComputeConfig(num_actors=4, num_gpus=1),
             name="MyProcessor",
         )
     """
 
     agent: Agent
-    config: AgentConfig = None
+    config: AgentRayComputeConfig = None
     name: Optional[str] = None
 
     # Input/output format handling
@@ -220,7 +220,7 @@ class AgentStage:
 
     def __post_init__(self):
         if self.config is None:
-            self.config = AgentConfig()
+            self.config = AgentRayComputeConfig()
         if self.name is None:
             self.name = self.agent.__class__.__name__
 
