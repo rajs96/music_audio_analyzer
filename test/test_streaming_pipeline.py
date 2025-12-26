@@ -4,6 +4,8 @@ Jobs are added to the queue at random intervals while the pipeline is consuming.
 This simulates a real-time production environment.
 
 Uses the new StreamingPipeline framework with Agent-based components.
+
+NEEDS to be run with the docker image and GPU
 """
 
 import ray
@@ -156,7 +158,8 @@ class StreamingJobProducer:
         # Pick a random audio file
         audio_file = random.choice(self.audio_files)
         job = create_job_from_file(audio_file)
-        self.job_queue.put(job)
+        row = job_to_row(job)
+        self.job_queue.put(row)
         self.jobs_submitted += 1
         return True
 
@@ -190,7 +193,7 @@ class StreamingJobProducer:
                 while time.time() < sleep_until and not self.stop_event.is_set():
                     time.sleep(0.05)
 
-            if self.jobs_submitted % 10 == 0:
+            if self.jobs_submitted % 100 == 0:
                 logger.info(
                     f"Producer progress: {self.jobs_submitted}/{self.total_jobs} jobs submitted"
                 )

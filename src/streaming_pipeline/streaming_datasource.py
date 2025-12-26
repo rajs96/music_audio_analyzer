@@ -204,36 +204,50 @@ class StreamingDatasource(rd.datasource.Datasource, ABC, Generic[T]):
         Each read task is an infinite generator that yields blocks
         until stop() is called.
         """
-        # Use config parallelism if not overridden
-        actual_parallelism = parallelism if parallelism > 0 else self.config.parallelism
+        # Force parallelism=1 for queue-based streaming to avoid multiple readers
+        # competing for the same queue items
+        actual_parallelism = 1
+
+        # Extract config values to avoid capturing self in closure
+        # Only capture serializable primitives and Ray actor handles
+        batch_size = self.config.batch_size
+        batch_timeout = self.config.batch_timeout
+        poll_interval = self.config.poll_interval
+        max_items = self.config.max_items
+        # Ray Queue is an actor handle and should be serializable
+        queue = getattr(self, "queue", None)
 
         def make_block_generator() -> Iterable[Block]:
             """
             Infinite generator that yields blocks of rows.
 
-            This is the core of streaming - it never returns until
-            stop() is called or STOP_SENTINEL is received.
+            Uses STOP_SENTINEL in queue for shutdown signaling (no threading.Event).
             """
             import pyarrow as pa
+            from ray.util.queue import Empty
 
-            while not self._stop_event.is_set():
-                # Check max items limit (thread-safe read)
-                with self._items_read_lock:
-                    items_read = self._items_read
-                if (
-                    self.config.max_items is not None
-                    and items_read >= self.config.max_items
-                ):
-                    logger.info(f"Reached max_items limit ({self.config.max_items})")
+            logger.info(f"Generator started. queue={queue}, max_items={max_items}")
+
+            if queue is None:
+                logger.error("Queue is None! Cannot read items.")
+                return
+
+            items_read = 0
+            stopped = False
+            last_log_time = time.time()
+
+            while not stopped:
+                # Check max items limit
+                if max_items is not None and items_read >= max_items:
+                    logger.info(f"Reached max_items limit ({max_items})")
                     break
 
                 # Collect a batch of items
-                batch: List[Dict[str, Any]] = []
-                batch_deadline = time.time() + self.config.batch_timeout
+                batch_rows: List[Dict[str, Any]] = []
+                batch_deadline = time.time() + batch_timeout
 
-                while len(batch) < self.config.batch_size:
-                    # Check stop condition
-                    if self._stop_event.is_set():
+                while len(batch_rows) < batch_size:
+                    if stopped:
                         break
 
                     # Calculate remaining time for this batch
@@ -241,47 +255,76 @@ class StreamingDatasource(rd.datasource.Datasource, ABC, Generic[T]):
                     if remaining <= 0:
                         break  # Batch timeout reached
 
-                    # Try to get next item
-                    timeout = min(remaining, self.config.poll_interval)
-                    item = self.get_next_item(timeout)
-
-                    if item is None:
-                        # No item available, continue waiting
+                    # Try to get next item from queue
+                    timeout = min(remaining, poll_interval)
+                    try:
+                        item = queue.get(timeout=timeout)
+                        if items_read < 5 or items_read % 100 == 0:
+                            logger.debug(f"Got item #{items_read}")
+                    except Empty:
+                        # Periodic logging when waiting
+                        if time.time() - last_log_time > 5.0:
+                            logger.debug(
+                                f"Waiting for items... items_read={items_read}, batch_rows={len(batch_rows)}"
+                            )
+                            last_log_time = time.time()
                         continue
 
                     if isinstance(item, _StopSentinel):
-                        # Clean shutdown signal
-                        logger.info("Received STOP_SENTINEL, shutting down")
-                        self._stop_event.set()
+                        # Clean shutdown signal - but first drain remaining items
+                        logger.info(
+                            "Received STOP_SENTINEL, draining remaining items..."
+                        )
+                        from ray.util.queue import Empty as QueueEmpty
+
+                        while True:
+                            try:
+                                remaining_item = queue.get(timeout=0.1)
+                                if isinstance(remaining_item, _StopSentinel):
+                                    continue
+                                if isinstance(remaining_item, dict):
+                                    row = remaining_item
+                                else:
+                                    row = {"data": remaining_item}
+                                serialized_row = _serialize_row_for_pyarrow(row)
+                                batch_rows.append(serialized_row)
+                                items_read += 1
+                            except QueueEmpty:
+                                break
+                        logger.info(f"Drained queue, total items read: {items_read}")
+                        stopped = True
                         break
 
-                    # Convert item to row and add to batch
+                    # Convert item to row - items should already be dicts
                     try:
-                        row = self.item_to_row(item)
+                        if isinstance(item, dict):
+                            row = item
+                        else:
+                            row = {"data": item}
                         # Serialize row for safe PyArrow table creation
                         serialized_row = _serialize_row_for_pyarrow(row)
-                        batch.append(serialized_row)
-                        with self._items_read_lock:
-                            self._items_read += 1
+                        batch_rows.append(serialized_row)
+                        items_read += 1
                     except Exception as e:
                         logger.error(f"Error converting item to row: {e}")
                         continue
 
                 # Yield batch as a PyArrow table if we have items
-                if batch:
+                if batch_rows:
                     try:
-                        table = pa.Table.from_pylist(batch)
+                        table = pa.Table.from_pylist(batch_rows)
+                        logger.debug(
+                            f"Yielding batch with {len(batch_rows)} rows, total_read={items_read}"
+                        )
                         yield table
                     except Exception as e:
                         logger.error(f"Error creating PyArrow table: {e}")
                         continue
-                elif not self._stop_event.is_set():
+                elif not stopped:
                     # Empty batch but not stopping - brief sleep to avoid busy loop
-                    time.sleep(self.config.poll_interval)
+                    time.sleep(poll_interval)
 
-            logger.info(
-                f"StreamingDatasource reader exiting, read {self._items_read} items"
-            )
+            logger.info(f"StreamingDatasource reader exiting, read {items_read} items")
 
         # Create read tasks with minimal metadata for streaming
         from ray.data.block import BlockMetadata
@@ -311,6 +354,11 @@ class QueueStreamingDatasource(StreamingDatasource[T]):
     This is a concrete implementation for the common case of
     reading from a Ray distributed queue.
 
+    For production use with concurrent producer/consumer:
+    - Set expected_items to the number of items the producer will submit
+    - The reader will stop after reading expected_items (no STOP_SENTINEL needed)
+    - Or use max_items in config for the same effect
+
     Example:
         from ray.util.queue import Queue
 
@@ -318,7 +366,7 @@ class QueueStreamingDatasource(StreamingDatasource[T]):
         datasource = QueueStreamingDatasource(
             queue=job_queue,
             item_to_row_fn=lambda job: {"id": job.id, "data": job.data},
-            config=StreamingDatasourceConfig(batch_size=64)
+            config=StreamingDatasourceConfig(batch_size=64, max_items=1000)
         )
 
         ds = ray.data.read_datasource(datasource)
@@ -329,10 +377,14 @@ class QueueStreamingDatasource(StreamingDatasource[T]):
         queue: "ray.util.queue.Queue",
         item_to_row_fn: Callable[[T], Dict[str, Any]],
         config: Optional[StreamingDatasourceConfig] = None,
+        expected_items: Optional[int] = None,
     ):
         super().__init__(config)
         self.queue = queue
         self._item_to_row_fn = item_to_row_fn
+        # If expected_items is set, use it as max_items
+        if expected_items is not None:
+            self.config.max_items = expected_items
 
     def get_next_item(self, timeout: float) -> Optional[T]:
         """Fetch next item from Ray Queue."""
@@ -357,7 +409,7 @@ class QueueStreamingDatasource(StreamingDatasource[T]):
         """
         Signal stop by pushing STOP_SENTINEL to the queue.
 
-        Use this when you can't directly call stop() on the datasource
-        (e.g., when it's running in a remote context).
+        Note: For concurrent producer/consumer, prefer using expected_items
+        or max_items instead of STOP_SENTINEL to avoid race conditions.
         """
         self.queue.put(STOP_SENTINEL)
