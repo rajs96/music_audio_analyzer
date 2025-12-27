@@ -10,7 +10,7 @@ You can run basic batched inference for instrument detection with the script `sr
 These scripst are tested in NVIDIA A100s, CUDA 12.4, and PyTorch 2.5.1. You can build the Dockerfile with:
 
 ```bash
-make_amd_runpods
+make build_amd_runpods
 ```
 
 Once you have the Dockerfile running, the environment should have everything you need to run it (assuming you have set your PYHONPATH at the root).
