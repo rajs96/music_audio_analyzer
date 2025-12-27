@@ -9,12 +9,18 @@ from src.pipelines.instrument_detection.models import load_model_and_processor
 from src.pipelines.instrument_detection.data import QwenOmniDataset
 
 
+def identity_collate(x):
+    """Collate function that returns first element (dataset already batches)."""
+    return x[0]
+
+
 def main():
     model_name = "Qwen/Qwen3-Omni-30B-A3B-Thinking"
     data_dir = "audio_files"
-    results_dir = Path("/app/results").resolve()
-    logger.info(f"Results directory: {results_dir}")
-    results_dir.mkdir(parents=True, exist_ok=True)
+    # results_dir = Path("/app/results").resolve()
+    # logger.info(f"Results directory: {results_dir}")
+    # results_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     batch_size = 4
     dtype = torch.bfloat16
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -41,7 +47,7 @@ def main():
         num_workers=num_workers,
         prefetch_factor=2,  # Prefetch 2 batches per worker
         persistent_workers=True,  # Keep workers alive between batches
-        collate_fn=lambda x: x[0],  # Dataset already returns batched inputs
+        collate_fn=identity_collate,  # Dataset already returns batched inputs
     )
     logger.info(f"DataLoader: {num_workers} workers, prefetch_factor=2")
 
@@ -52,25 +58,30 @@ def main():
             logger.info(f"Processing batch {batch_idx + 1}/{len(dataloader)}")
 
             # Move inputs to device
-            inputs = {}
+            processed_inputs = {}
             for k, v in inputs.items():
                 if isinstance(v, torch.Tensor):
                     if v.is_floating_point():
-                        inputs[k] = v.to(device).to(dtype)
+                        processed_inputs[k] = v.to(device).to(dtype)
                     else:
-                        inputs[k] = v.to(device)
+                        processed_inputs[k] = v.to(device)
                 else:
-                    inputs[k] = v
+                    processed_inputs[k] = v
 
+            logger.info(f"processed: {processed_inputs}")
             # Generate
-            output_ids = model.generate(
-                **inputs,
-                max_new_tokens=256,
-                do_sample=False,
-            )
+            try:
+                output_ids = model.generate(
+                    **processed_inputs,
+                    max_new_tokens=256,
+                    do_sample=False,
+                )
+            except Exception as e:
+                logger.error(f"Error generating: {e}")
+                continue
 
             # Decode output
-            generated_ids = output_ids[:, inputs["input_ids"].shape[1] :]
+            generated_ids = output_ids[:, processed_inputs["input_ids"].shape[1] :]
             response = processor.batch_decode(generated_ids, skip_special_tokens=True)
 
             logger.info(f"Response: {response}")
