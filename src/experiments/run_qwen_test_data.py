@@ -103,11 +103,11 @@ def main():
     end_time = time.time()
     logger.info(f"Time taken: {end_time - start_time} seconds")
     logger.info(
-        f"Time taken per file: {(end_time - start_time) / len(dataloader)} seconds"
+        f"Time taken per file: {(end_time - start_time) / len(dataloader) * batch_size} seconds"
     )
 
     logger.info("--- All Results ---")
-    for result in results.iterrows():
+    for result in results_df.iterrows():
         logger.info(f"Song {result.song_name}: {result.response}")
 
     logger.info(results_df.head(20))
