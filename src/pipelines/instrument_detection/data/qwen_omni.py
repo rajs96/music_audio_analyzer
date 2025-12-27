@@ -71,7 +71,8 @@ class QwenOmniDataset(Dataset):
         - synthesizer
         - strings
         - wind
-        - vocals
+        - lead_vocals
+        - backing_vocals
 
         Example output 1: ['drums', 'electric_guitar', 'piano', 'vocals']
         Example output 2: ['acoustic_guitar', 'piano', 'vocals', 'bass']

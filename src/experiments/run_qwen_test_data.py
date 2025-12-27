@@ -15,7 +15,7 @@ def identity_collate(x):
 
 
 def main():
-    model_name = "Qwen/Qwen3-Omni-30B-A3B-Thinking"
+    model_name = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
     data_dir = "audio_files"
     results_dir = Path("/app/results").resolve()
     logger.info(f"Results directory: {results_dir}")
@@ -71,21 +71,20 @@ def main():
             logger.info(f"processed: {processed_inputs}")
             # Generate
             try:
-                text_ids, _ = model.generate(
-                    **processed_inputs,
-                    max_new_tokens=256,
-                    do_sample=False,
-                    return_audio=False,
-                )
+                with torch.no_grad():
+                    text_ids, _ = model.generate(
+                        **processed_inputs,
+                        max_new_tokens=256,
+                        do_sample=False,
+                        return_audio=False,
+                    )
             except Exception as e:
                 logger.error(f"Error generating: {e}")
                 continue
 
             # Decode output
             logger.info(f"text_ids: {text_ids}")
-            generated_ids = text_ids.sequences[
-                :, processed_inputs["input_ids"].shape[1] :
-            ]
+            generated_ids = text_ids[:, processed_inputs["input_ids"].shape[1] :]
             response = processor.batch_decode(generated_ids, skip_special_tokens=True)
 
             logger.info(f"Response: {response}")

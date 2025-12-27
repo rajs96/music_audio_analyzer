@@ -240,7 +240,7 @@ def main(
     detector_num_gpus: float = 1.0,
     detector_max_concurrency: int = 1,
     # Model config
-    model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Thinking",
+    model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct",
     cache_dir: str = DEFAULT_CACHE_DIR,
     skip_cache: bool = False,
     dtype: torch.dtype = torch.bfloat16,

@@ -137,9 +137,7 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         )
         return inputs
 
-    def predict_batch_internal(self, waveforms: List[np.ndarray]) -> List[str]:
-        """Run inference on a batch of waveforms."""
-        inputs = self.tokenize(waveforms)
+    def process_hf_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         processed_inputs = {}
         for k, v in inputs.items():
             if isinstance(v, torch.Tensor):
@@ -149,6 +147,12 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
                     processed_inputs[k] = v.to(device=self.device)
             else:
                 processed_inputs[k] = v
+        return processed_inputs
+
+    def predict_batch_internal(self, waveforms: List[np.ndarray]) -> List[str]:
+        """Run inference on a batch of waveforms."""
+        inputs = self.tokenize(waveforms)
+        processed_inputs = self.process_hf_inputs(inputs)
 
         with torch.no_grad():
             text_ids, _ = self.model.generate(
@@ -158,7 +162,7 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
                 return_audio=False,
             )
 
-        generated_ids = text_ids.sequences[:, processed_inputs["input_ids"].shape[1] :]
+        generated_ids = text_ids[:, processed_inputs["input_ids"].shape[1] :]
         responses = self.processor.batch_decode(generated_ids, skip_special_tokens=True)
 
         return responses
