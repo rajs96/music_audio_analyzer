@@ -151,13 +151,14 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
                 processed_inputs[k] = v
 
         with torch.no_grad():
-            output_ids = self.model.generate(
+            text_ids, _ = self.model.generate(
                 **processed_inputs,
                 max_new_tokens=256,
                 do_sample=False,
+                return_audio=False,
             )
 
-        generated_ids = output_ids[:, processed_inputs["input_ids"].shape[1] :]
+        generated_ids = text_ids.sequences[:, processed_inputs["input_ids"].shape[1] :]
         responses = self.processor.batch_decode(generated_ids, skip_special_tokens=True)
 
         return responses
