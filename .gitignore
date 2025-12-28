@@ -145,4 +145,5 @@ dmypy.json
 Thumbs.db
 
 audio_files/
+eval_audio_files/
 .cursor/

@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 from ray._raylet import ObjectRef
 import numpy as np
 
@@ -26,9 +27,26 @@ class PreprocessedAudio:
 
 @dataclass
 class InstrumentDetectResult:
+    """Result from basic instrument detection."""
+
     job_id: str
     song_id: str
     song_hash: str
     filename: str
-    instruments: list[str]
+    instruments: List[str]
     detected_at: int
+
+
+@dataclass
+class InstrumentDetectCoTResult:
+    """Result from chain-of-thought instrument detection with layer information."""
+
+    job_id: str
+    song_id: str
+    song_hash: str
+    filename: str
+    background: List[str] = field(default_factory=list)
+    middle_ground: List[str] = field(default_factory=list)
+    foreground: List[str] = field(default_factory=list)
+    instruments: List[str] = field(default_factory=list)  # flattened
+    detected_at: int = 0

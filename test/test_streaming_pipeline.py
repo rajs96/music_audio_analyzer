@@ -35,7 +35,7 @@ from src.pipelines.instrument_detection.agents.instrument_detector import (
     InstrumentDetectorAgent,
 )
 from src.pipelines.instrument_detection.data_classes import InstrumentDetectJob
-from src.pipelines.instrument_detection.models import load_model_and_processor
+from src.models import load_model_and_processor
 
 # Map string names to torch dtypes
 DTYPE_MAP = {

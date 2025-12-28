@@ -1,6 +1,8 @@
 import os
 import requests
 import subprocess
+from pathlib import Path
+from loguru import logger
 
 AUDIO_FILES_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "audio_files")
 
@@ -22,6 +24,9 @@ def download_audio(
     os.makedirs(output_dir, exist_ok=True)
 
     output_template = os.path.join(output_dir, filename if filename else "%(title)s")
+    if Path(output_template).exists():
+        logger.info(f"File already exists: {output_template}")
+        return output_template
 
     cmd = [
         "yt-dlp",
