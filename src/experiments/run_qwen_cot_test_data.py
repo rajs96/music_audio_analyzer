@@ -83,7 +83,6 @@ def main():
             enumerate(dataloader), total=len(dataloader)
         ):
             logger.info(f"Processing batch {batch_idx + 1}/{len(dataloader)}")
-            total_examples_processed += len(filenames)
 
             # Move inputs to device
             processed_inputs = {}
@@ -111,9 +110,11 @@ def main():
                 continue
 
             # Parse and collect results
-            for filename, response in zip(filenames, responses):
+            for filename, planning_response, final_response in zip(
+                filenames, planning_responses, final_responses
+            ):
                 song_name = filename.split("/")[-1].split(".")[0]
-                instruments = parse_instruments_json(response)
+                instruments = parse_instruments_json(final_response)
 
                 results.append(
                     {
@@ -122,14 +123,22 @@ def main():
                         "background": instruments.get("background", []),
                         "middle_ground": instruments.get("middle_ground", []),
                         "foreground": instruments.get("foreground", []),
-                        "raw_response": response,
+                        "planning_response": planning_response,
+                        "raw_response": final_response,
                     }
                 )
+                if total_examples_processed % 100 == 0:
+                    logger.info(f"Example {total_examples_processed}:")
+                    logger.info(f"Planning response: {planning_response}")
+                    logger.info(f"Final response: {final_response}")
+                    logger.info(f"{song_name}:")
+                    logger.info(f"  Background: {instruments.get('background', [])}")
+                    logger.info(
+                        f"  Middle-ground: {instruments.get('middle_ground', [])}"
+                    )
+                    logger.info(f"  Foreground: {instruments.get('foreground', [])}")
 
-                logger.info(f"{song_name}:")
-                logger.info(f"  Background: {instruments.get('background', [])}")
-                logger.info(f"  Middle-ground: {instruments.get('middle_ground', [])}")
-                logger.info(f"  Foreground: {instruments.get('foreground', [])}")
+            total_examples_processed += len(filenames)
 
     # Save results
     results_df = pd.DataFrame(results)
