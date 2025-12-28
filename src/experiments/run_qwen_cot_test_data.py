@@ -100,7 +100,8 @@ def main():
                 planning_responses, final_responses = detector.generate(
                     waveforms=waveforms,
                     inputs=processed_inputs,
-                    generate_kwargs=generate_kwargs,
+                    planning_generate_kwargs=generate_kwargs,
+                    response_generate_kwargs=generate_kwargs,
                 )
             except Exception as e:
                 logger.error(f"Error generating: {e}")

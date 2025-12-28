@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from src.data.qwen_omni import QwenOmniDataset, QwenOmniCoTDataset
 
@@ -79,16 +79,29 @@ class QwenOmniCoTInstrumentDetector(QwenOmniInstrumentDetector):
         self,
         waveforms: List[np.ndarray],
         inputs: Dict[str, Any],
-        generate_kwargs: Dict[str, Any] = {},
-    ) -> List[str]:
+        planning_generate_kwargs: Optional[Dict[str, Any]] = None,
+        response_generate_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> tuple[List[str], List[str]]:
         """
         Two-step chain-of-thought generation for instrument detection.
 
-        Step 1: Describe what's heard in each layer
-        Step 2: Convert descriptions to structured JSON
+        Step 1: Describe what's heard in each layer (uses planning_generate_kwargs)
+        Step 2: Convert descriptions to structured JSON (uses response_generate_kwargs)
+
+        Args:
+            waveforms: List of audio waveforms for step 2 conversation building
+            inputs: Tokenized inputs for step 1
+            planning_generate_kwargs: Generation kwargs for step 1 (planning/description)
+            response_generate_kwargs: Generation kwargs for step 2 (JSON response)
+
+        Returns:
+            Tuple of (planning_responses, final_responses)
         """
+        planning_kwargs = planning_generate_kwargs or {}
+        response_kwargs = response_generate_kwargs or {}
+
         # Step 1: Get layer descriptions
-        step_1_responses = super().generate(inputs, generate_kwargs)
+        step_1_responses = super().generate(inputs, planning_kwargs)
 
         # Step 2: Build conversations using dataset's conversation builder
         conversations = [
@@ -107,6 +120,6 @@ class QwenOmniCoTInstrumentDetector(QwenOmniInstrumentDetector):
             k: v.to(self.device, dtype=self.dtype) for k, v in inputs_step_2.items()
         }
 
-        step_2_responses = super().generate(inputs_step_2, generate_kwargs)
+        step_2_responses = super().generate(inputs_step_2, response_kwargs)
 
         return step_1_responses, step_2_responses

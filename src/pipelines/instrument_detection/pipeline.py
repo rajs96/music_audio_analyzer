@@ -5,7 +5,7 @@ Creates a streaming pipeline for detecting instruments in audio files.
 """
 
 from typing import Any, Dict
-
+import torch
 from ray.util.queue import Queue
 
 from src.streaming_pipeline import (
@@ -22,9 +22,20 @@ from .data_classes import (
 )
 from .agents import (
     AudioPreprocessorAgent,
-    InstrumentDetectorAgent,
     InstrumentDetectorCoTAgent,
 )
+
+DEFAULT_COT_GENERATE_KWARGS = {
+    "max_new_tokens": 512,
+    "do_sample": False,
+    "return_audio": False,
+}
+
+DEFAULT_GENERATE_KWARGS = {
+    "max_new_tokens": 256,
+    "do_sample": False,
+    "return_audio": False,
+}
 
 
 def job_to_row(job: InstrumentDetectJob) -> Dict[str, Any]:
@@ -123,6 +134,8 @@ def create_pipeline(
         ),
     )
 
+    dtype = torch.bfloat16
+    device = "cuda"
     # Create agent stages
     stages = [
         # Stage 1: Preprocessing (CPU-bound, parallelizable)
@@ -138,7 +151,13 @@ def create_pipeline(
         ),
         # Stage 2: Detection (GPU-bound)
         AgentStage(
-            agent=InstrumentDetectorAgent(model_name=model_name),
+            agent=InstrumentDetectorCoTAgent(
+                model_name=model_name,
+                dtype=dtype,
+                device=device,
+                planning_generate_kwargs=DEFAULT_COT_GENERATE_KWARGS,
+                response_generate_kwargs=DEFAULT_COT_GENERATE_KWARGS,
+            ),
             config=AgentRayComputeConfig(
                 num_actors=num_detectors,
                 batch_size=detector_batch_size,

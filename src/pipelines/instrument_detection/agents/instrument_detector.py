@@ -6,7 +6,7 @@ Runs ML inference to detect instruments in preprocessed audio.
 
 import json
 import time
-from typing import Any, Dict, List, Type
+from typing import Any, Dict, List, Optional, Type
 
 import numpy as np
 import torch
@@ -17,6 +17,19 @@ from src.models.qwen_instrument_detector import (
     QwenOmniInstrumentDetector,
     QwenOmniCoTInstrumentDetector,
 )
+
+# Default generation kwargs
+DEFAULT_GENERATE_KWARGS = {
+    "max_new_tokens": 256,
+    "do_sample": False,
+    "return_audio": False,
+}
+
+DEFAULT_COT_GENERATE_KWARGS = {
+    "max_new_tokens": 512,
+    "do_sample": False,
+    "return_audio": False,
+}
 
 
 class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
@@ -51,12 +64,14 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen2-Audio-7B-Instruct",
+        model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         dtype: torch.dtype = torch.bfloat16,
+        generate_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         self.model_name = model_name
         self.dtype = dtype
+        self.generate_kwargs = generate_kwargs or DEFAULT_GENERATE_KWARGS.copy()
 
         # Will be initialized in setup()
         self.detector: QwenOmniInstrumentDetector = None
@@ -124,14 +139,8 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         inputs = self.tokenize(waveforms)
         processed_inputs = self.process_hf_inputs(inputs)
 
-        generate_kwargs = {
-            "max_new_tokens": 256,
-            "do_sample": False,
-            "return_audio": False,
-        }
-
         with torch.no_grad():
-            responses = self.detector.generate(processed_inputs, generate_kwargs)
+            responses = self.detector.generate(processed_inputs, self.generate_kwargs)
 
         return responses
 
@@ -299,6 +308,22 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
     # Override detector class for CoT
     DETECTOR_CLS: Type[QwenOmniCoTInstrumentDetector] = QwenOmniCoTInstrumentDetector
 
+    def __init__(
+        self,
+        model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        dtype: torch.dtype = torch.bfloat16,
+        planning_generate_kwargs: Optional[Dict[str, Any]] = None,
+        response_generate_kwargs: Optional[Dict[str, Any]] = None,
+    ):
+        # Call parent but don't use its generate_kwargs (CoT uses separate kwargs)
+        super().__init__(model_name=model_name, dtype=dtype)
+        self.planning_generate_kwargs = (
+            planning_generate_kwargs or DEFAULT_COT_GENERATE_KWARGS.copy()
+        )
+        self.response_generate_kwargs = (
+            response_generate_kwargs or DEFAULT_COT_GENERATE_KWARGS.copy()
+        )
+
     def predict_batch_internal(
         self, waveforms: List[np.ndarray]
     ) -> tuple[List[str], List[str]]:
@@ -306,15 +331,12 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
         inputs = self.tokenize(waveforms)
         processed_inputs = self.process_hf_inputs(inputs)
 
-        generate_kwargs = {
-            "max_new_tokens": 512,
-            "do_sample": False,
-            "return_audio": False,
-        }
-
         with torch.no_grad():
             planning_responses, final_responses = self.detector.generate(
-                waveforms, processed_inputs, generate_kwargs
+                waveforms,
+                processed_inputs,
+                planning_generate_kwargs=self.planning_generate_kwargs,
+                response_generate_kwargs=self.response_generate_kwargs,
             )
 
         return planning_responses, final_responses
