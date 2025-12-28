@@ -109,4 +109,4 @@ class QwenOmniCoTInstrumentDetector(QwenOmniInstrumentDetector):
 
         step_2_responses = super().generate(inputs_step_2, generate_kwargs)
 
-        return step_2_responses
+        return step_1_responses, step_2_responses

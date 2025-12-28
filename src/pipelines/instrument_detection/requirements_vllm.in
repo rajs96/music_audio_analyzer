@@ -1,4 +1,5 @@
 pandas
+tqdm
 pyarrow
 transformers
 accelerate==1.1.0

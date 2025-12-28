@@ -6,22 +6,25 @@ Runs ML inference to detect instruments in preprocessed audio.
 
 import json
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Type
 
 import numpy as np
 import torch
 from loguru import logger
 
 from src.streaming_pipeline import Agent
-from src.data.qwen_omni import QwenOmniDataset, QwenOmniCoTDataset
+from src.models.qwen_instrument_detector import (
+    QwenOmniInstrumentDetector,
+    QwenOmniCoTInstrumentDetector,
+)
 
 
 class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
     """
     Agent that runs instrument detection on preprocessed audio.
 
+    Uses QwenOmniInstrumentDetector for model loading and inference.
     The model is loaded once in setup() and reused for all batches.
-    Uses QwenOmniDataset for conversation building.
 
     Input format:
         {
@@ -43,8 +46,8 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         }
     """
 
-    # Dataset class for conversation building
-    DATASET_CLS = QwenOmniDataset
+    # Detector class to use
+    DETECTOR_CLS: Type[QwenOmniInstrumentDetector] = QwenOmniInstrumentDetector
 
     def __init__(
         self,
@@ -56,9 +59,7 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         self.dtype = dtype
 
         # Will be initialized in setup()
-        self.model = None
-        self.processor = None
-        self.device = None
+        self.detector: QwenOmniInstrumentDetector = None
 
         # Timing metrics
         self.total_inference_time_ms = 0.0
@@ -66,37 +67,35 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         self.processed_count = 0
 
     def setup(self) -> None:
-        """Load the model - called once per actor."""
-        from src.models.load_qwen import load_model_and_processor
-
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        """Load the detector - called once per actor."""
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(
-            f"{self.__class__.__name__} loading model {self.model_name} "
-            f"on {self.device} with dtype={self.dtype}"
+            f"{self.__class__.__name__} loading detector {self.model_name} "
+            f"on {device} with dtype={self.dtype}"
         )
 
-        self.model, self.processor = load_model_and_processor(
-            self.model_name, self.dtype, self.device
+        self.detector = self.DETECTOR_CLS(
+            model_name=self.model_name,
+            dtype=self.dtype,
+            device=device,
         )
-        self.model.eval()
-        logger.info(f"{self.__class__.__name__} model loaded")
+        logger.info(f"{self.__class__.__name__} detector loaded")
 
     def teardown(self) -> None:
-        """Clean up model resources."""
-        if self.model is not None:
-            del self.model
-            del self.processor
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        """Clean up detector resources."""
+        if self.detector is not None:
+            self.detector.unload()
+            self.detector = None
             logger.info(f"{self.__class__.__name__} cleaned up")
 
     def tokenize(self, waveforms: List[np.ndarray]) -> Dict[str, Any]:
-        """Convert waveforms to model inputs using dataset conversation builder."""
+        """Convert waveforms to model inputs using detector's dataset conversation builder."""
         conversations = [
-            self.DATASET_CLS.get_conversation(waveform) for waveform in waveforms
+            self.detector.DATASET_CLS.get_conversation(waveform)
+            for waveform in waveforms
         ]
 
-        inputs = self.processor.apply_chat_template(
+        inputs = self.detector.processor.apply_chat_template(
             conversations,
             add_generation_prompt=True,
             tokenize=True,
@@ -111,32 +110,30 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         for k, v in inputs.items():
             if isinstance(v, torch.Tensor):
                 if v.is_floating_point():
-                    processed_inputs[k] = v.to(device=self.device, dtype=self.dtype)
+                    processed_inputs[k] = v.to(
+                        device=self.detector.device, dtype=self.dtype
+                    )
                 else:
-                    processed_inputs[k] = v.to(device=self.device)
+                    processed_inputs[k] = v.to(device=self.detector.device)
             else:
                 processed_inputs[k] = v
         return processed_inputs
 
-    def generate_responses(self, inputs: Dict[str, Any]) -> List[str]:
-        """Run model generation and decode responses."""
-        with torch.no_grad():
-            text_ids, _ = self.model.generate(
-                **inputs,
-                max_new_tokens=256,
-                do_sample=False,
-                return_audio=False,
-            )
-
-        generated_ids = text_ids[:, inputs["input_ids"].shape[1] :]
-        responses = self.processor.batch_decode(generated_ids, skip_special_tokens=True)
-        return responses
-
     def predict_batch_internal(self, waveforms: List[np.ndarray]) -> List[str]:
-        """Run inference on a batch of waveforms."""
+        """Run inference on a batch of waveforms using detector."""
         inputs = self.tokenize(waveforms)
         processed_inputs = self.process_hf_inputs(inputs)
-        return self.generate_responses(processed_inputs)
+
+        generate_kwargs = {
+            "max_new_tokens": 256,
+            "do_sample": False,
+            "return_audio": False,
+        }
+
+        with torch.no_grad():
+            responses = self.detector.generate(processed_inputs, generate_kwargs)
+
+        return responses
 
     def _parse_instruments(self, prediction: str) -> Dict[str, Any]:
         """Parse the model output to extract instrument list."""
@@ -280,11 +277,9 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
     """
     Agent that runs chain-of-thought instrument detection on preprocessed audio.
 
-    Two-step approach:
-    1. Planning: Describe sounds in background/middle-ground/foreground layers
-    2. Classification: Given descriptions, output structured JSON with instruments
-
-    Uses QwenOmniCoTDataset for conversation building.
+    Uses QwenOmniCoTInstrumentDetector for two-step reasoning:
+    1. Describe sounds in background/middle-ground/foreground layers
+    2. Convert descriptions to structured JSON with instruments
 
     Output format includes layer-based instruments:
         {
@@ -296,61 +291,33 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
             "middle_ground": List[str],
             "foreground": List[str],
             "instruments": List[str],  # flattened for backwards compat
+            "planning_response": str,  # step 1 response
             "detected_at": int,
         }
     """
 
-    # Override dataset class for CoT prompts
-    DATASET_CLS = QwenOmniCoTDataset
+    # Override detector class for CoT
+    DETECTOR_CLS: Type[QwenOmniCoTInstrumentDetector] = QwenOmniCoTInstrumentDetector
 
-    def predict_batch_internal(self, waveforms: List[np.ndarray]) -> List[str]:
-        """Run two-step CoT inference on a batch of waveforms."""
-        # Step 1: Get layer descriptions
+    def predict_batch_internal(
+        self, waveforms: List[np.ndarray]
+    ) -> tuple[List[str], List[str]]:
+        """Run two-step CoT inference on a batch of waveforms using detector."""
         inputs = self.tokenize(waveforms)
         processed_inputs = self.process_hf_inputs(inputs)
 
-        with torch.no_grad():
-            text_ids, _ = self.model.generate(
-                **processed_inputs,
-                max_new_tokens=512,
-                do_sample=False,
-                return_audio=False,
-            )
-
-        generated_ids = text_ids[:, processed_inputs["input_ids"].shape[1] :]
-        step_1_responses = self.processor.batch_decode(
-            generated_ids, skip_special_tokens=True
-        )
-
-        # Step 2: Build step 2 conversations and generate
-        conversations = [
-            self.DATASET_CLS.get_step_2_conversation(waveform, response)
-            for waveform, response in zip(waveforms, step_1_responses)
-        ]
-
-        inputs_step_2 = self.processor.apply_chat_template(
-            conversations,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_tensors="pt",
-            return_dict=True,
-        )
-        processed_inputs_2 = self.process_hf_inputs(inputs_step_2)
+        generate_kwargs = {
+            "max_new_tokens": 512,
+            "do_sample": False,
+            "return_audio": False,
+        }
 
         with torch.no_grad():
-            text_ids_2, _ = self.model.generate(
-                **processed_inputs_2,
-                max_new_tokens=512,
-                do_sample=False,
-                return_audio=False,
+            planning_responses, final_responses = self.detector.generate(
+                waveforms, processed_inputs, generate_kwargs
             )
 
-        generated_ids_2 = text_ids_2[:, processed_inputs_2["input_ids"].shape[1] :]
-        step_2_responses = self.processor.batch_decode(
-            generated_ids_2, skip_special_tokens=True
-        )
-
-        return step_2_responses
+        return planning_responses, final_responses
 
     def _parse_instruments(self, prediction: str) -> Dict[str, Any]:
         """Parse the model output to extract layered instrument JSON."""
@@ -399,12 +366,17 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
             "middle_ground": [],
             "foreground": [],
             "instruments": [],
+            "planning_response": "",
             "detected_at": now,
             "error": error,
         }
 
     def _create_success_result(
-        self, item: Dict[str, Any], now: int, parsed: Dict[str, Any]
+        self,
+        item: Dict[str, Any],
+        now: int,
+        parsed: Dict[str, Any],
+        planning_response: str = "",
     ) -> Dict[str, Any]:
         """Create a success result for an item with CoT fields."""
         return {
@@ -416,6 +388,48 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
             "middle_ground": parsed.get("middle_ground", []),
             "foreground": parsed.get("foreground", []),
             "instruments": parsed.get("instruments", []),
+            "planning_response": planning_response,
             "detected_at": now,
             "error": None,
         }
+
+    def process_batch(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Process a batch of preprocessed audio through the CoT detector."""
+        if not items:
+            return []
+
+        now = int(time.time())
+
+        # Extract waveforms, separating errors
+        results, valid_items, valid_waveforms = self._get_waveforms_from_items(
+            items, now
+        )
+
+        # Run inference on valid items
+        if valid_waveforms:
+            inference_start = time.time()
+            planning_responses, final_responses = self.predict_batch_internal(
+                valid_waveforms
+            )
+            inference_time_ms = (time.time() - inference_start) * 1000
+
+            # Update metrics
+            self.total_inference_time_ms += inference_time_ms
+            self.batch_count += 1
+            self.processed_count += len(valid_items)
+
+            logger.info(
+                f"Batch inference: {inference_time_ms:.1f}ms "
+                f"({inference_time_ms/len(valid_items):.1f}ms/example)"
+            )
+
+            # Create results for valid items
+            for item, planning, final in zip(
+                valid_items, planning_responses, final_responses
+            ):
+                parsed = self._parse_instruments(final)
+                results.append(self._create_success_result(item, now, parsed, planning))
+
+                logger.debug(f"Detected instruments for {item['filename']}: {parsed}")
+
+        return results

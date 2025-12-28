@@ -1,4 +1,5 @@
 import json
+from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader
 from loguru import logger
@@ -76,9 +77,13 @@ def main():
     results = []
     start_time = time.time()
 
+    total_examples_processed = 0
     with torch.no_grad():
-        for batch_idx, (filenames, waveforms, inputs) in enumerate(dataloader):
+        for batch_idx, (filenames, waveforms, inputs) in tqdm(
+            enumerate(dataloader), total=len(dataloader)
+        ):
             logger.info(f"Processing batch {batch_idx + 1}/{len(dataloader)}")
+            total_examples_processed += len(filenames)
 
             # Move inputs to device
             processed_inputs = {}
@@ -93,7 +98,7 @@ def main():
 
             # Generate using CoT detector
             try:
-                responses = detector.generate(
+                planning_responses, final_responses = detector.generate(
                     waveforms=waveforms,
                     inputs=processed_inputs,
                     generate_kwargs=generate_kwargs,
