@@ -36,3 +36,6 @@ middle_ground: ['electric piano', 'synth pad', 'sampled loop']
 foreground: ['male lead vocal', 'ad-libs', 'spoken word']
 '''
 ```
+
+TODO: describe bulk streaming pipeline.
+TODO: Stem splitting based on instrument descriptions

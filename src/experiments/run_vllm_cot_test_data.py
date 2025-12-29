@@ -17,17 +17,6 @@ import numpy as np
 from src.models.qwen_instrument_detector import QwenOmniCoTInstrumentDetector
 
 
-DEFAULT_PLANNING_KWARGS = {
-    "temperature": 0.0,
-    "max_tokens": 512,
-}
-
-DEFAULT_RESPONSE_KWARGS = {
-    "temperature": 0.0,
-    "max_tokens": 128,
-}
-
-
 def decode_audio(filepath: str, target_sr: int = 16000) -> np.ndarray:
     """Decode audio file to waveform at target sample rate."""
     wav, sr = torchaudio.load(filepath)
@@ -74,8 +63,20 @@ def main(args):
     batch_size = args.batch_size
     target_sr = 16000
 
+    # Build sampling kwargs from CLI args
+    planning_kwargs = {
+        "temperature": args.planning_temperature,
+        "max_tokens": args.planning_max_tokens,
+    }
+    response_kwargs = {
+        "temperature": args.response_temperature,
+        "max_tokens": args.response_max_tokens,
+    }
+
     logger.info(f"Loading vLLM model: {model_name}")
     logger.info(f"Tensor parallel size: {args.tensor_parallel_size or 'auto'}")
+    logger.info(f"Planning kwargs: {planning_kwargs}")
+    logger.info(f"Response kwargs: {response_kwargs}")
 
     # Load detector with vLLM backend
     detector = QwenOmniCoTInstrumentDetector(
@@ -123,8 +124,8 @@ def main(args):
         try:
             planning_responses, final_responses = detector.generate(
                 waveforms=waveforms,
-                planning_sampling_kwargs=DEFAULT_PLANNING_KWARGS,
-                response_sampling_kwargs=DEFAULT_RESPONSE_KWARGS,
+                planning_sampling_kwargs=planning_kwargs,
+                response_sampling_kwargs=response_kwargs,
             )
         except Exception as e:
             logger.error(f"Error generating: {e}")
@@ -257,6 +258,34 @@ if __name__ == "__main__":
         type=int,
         default=8,
         help="Maximum number of sequences to process in parallel",
+    )
+
+    # Planning (step 1) kwargs
+    parser.add_argument(
+        "--planning_max_tokens",
+        type=int,
+        default=256,
+        help="Max tokens for planning step",
+    )
+    parser.add_argument(
+        "--planning_temperature",
+        type=float,
+        default=0.0,
+        help="Temperature for planning step",
+    )
+
+    # Response (step 2) kwargs
+    parser.add_argument(
+        "--response_max_tokens",
+        type=int,
+        default=128,
+        help="Max tokens for response step",
+    )
+    parser.add_argument(
+        "--response_temperature",
+        type=float,
+        default=0.0,
+        help="Temperature for response step",
     )
 
     args = parser.parse_args()
