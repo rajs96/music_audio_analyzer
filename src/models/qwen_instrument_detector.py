@@ -59,11 +59,13 @@ class QwenOmniInstrumentDetector:
                     processed_inputs[k] = v.to(self.device)
             else:
                 processed_inputs[k] = v
+        return processed_inputs
 
     def generate(
         self, inputs: Dict[str, Any], generate_kwargs: Dict[str, Any] = {}
     ) -> List[str]:
         """Single-step generation for instrument detection."""
+        inputs = self.process_hf_inputs(inputs)
         text_ids, _ = self.model.generate(**inputs, **generate_kwargs)
         generated_ids = text_ids[:, inputs["input_ids"].shape[1] :]
         responses: List[str] = self.processor.batch_decode(
@@ -111,6 +113,8 @@ class QwenOmniCoTInstrumentDetector(QwenOmniInstrumentDetector):
         planning_kwargs = planning_generate_kwargs or {}
         response_kwargs = response_generate_kwargs or {}
 
+        inputs = self.process_hf_inputs(inputs)
+
         # Step 1: Get layer descriptions
         step_1_responses = super().generate(inputs, planning_kwargs)
 
@@ -127,9 +131,7 @@ class QwenOmniCoTInstrumentDetector(QwenOmniInstrumentDetector):
             return_tensors="pt",
             return_dict=True,
         )
-        inputs_step_2 = {
-            k: v.to(self.device, dtype=self.dtype) for k, v in inputs_step_2.items()
-        }
+        inputs_step_2 = self.process_hf_inputs(inputs_step_2)
 
         step_2_responses = super().generate(inputs_step_2, response_kwargs)
 

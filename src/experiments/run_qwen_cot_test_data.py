@@ -85,22 +85,11 @@ def main(args):
         ):
             logger.info(f"Processing batch {batch_idx + 1}/{len(dataloader)}")
 
-            # Move inputs to device
-            processed_inputs = {}
-            for k, v in inputs.items():
-                if isinstance(v, torch.Tensor):
-                    if v.is_floating_point():
-                        processed_inputs[k] = v.to(device).to(dtype)
-                    else:
-                        processed_inputs[k] = v.to(device)
-                else:
-                    processed_inputs[k] = v
-
             # Generate using CoT detector
             try:
                 planning_responses, final_responses = detector.generate(
                     waveforms=waveforms,
-                    inputs=processed_inputs,
+                    inputs=inputs,
                     planning_generate_kwargs=generate_kwargs,
                     response_generate_kwargs=generate_kwargs,
                 )
