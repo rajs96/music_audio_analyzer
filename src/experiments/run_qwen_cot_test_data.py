@@ -14,13 +14,15 @@ from src.models.qwen_instrument_detector import QwenOmniCoTInstrumentDetector
 
 DEFAULT_GENERATE_KWARGS = {
     "max_new_tokens": 256,
-    "do_sample": False,
     "return_audio": False,
+    "thinker_do_sample": False,
+    "talker_do_sample": False,
 }
 
 DEFAULT_COT_GENERATE_KWARGS = {
-    "max_new_tokens": 1024,
-    "do_sample": False,
+    "max_new_tokens": 256,
+    "thinker_do_sample": False,
+    "talker_do_sample": False,
     "return_audio": False,
 }
 
@@ -43,7 +45,7 @@ def parse_instruments_json(response: str) -> dict:
 
 
 def main(args):
-    model_name = args.model_name
+    model_name = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
     data_dir = args.data_dir
     results_dir = Path(args.results_dir).resolve()
     logger.info(f"Results directory: {results_dir}")

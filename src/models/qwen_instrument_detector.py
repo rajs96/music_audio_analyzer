@@ -1,15 +1,27 @@
+"""
+Qwen-based instrument detector with support for both HuggingFace and vLLM backends.
+
+Use `use_vllm=True` for efficient batched inference with vLLM.
+"""
+
+import os
 import torch
 import numpy as np
 from typing import List, Dict, Any, Optional
 
 from src.data.qwen_omni import QwenOmniDataset, QwenOmniCoTDataset
 
+# Disable vLLM v1 engine (not supported for this model yet)
+os.environ["VLLM_USE_V1"] = "0"
+
 
 class QwenOmniInstrumentDetector:
     """
     Base Qwen-based instrument detector.
 
-    Uses simple single-step prompting with fixed instrument labels.
+    Supports both HuggingFace transformers and vLLM backends.
+    Use `use_vllm=True` for efficient batched inference.
+
     Prompts and conversation builders are defined in QwenOmniDataset.
     """
 
@@ -21,17 +33,43 @@ class QwenOmniInstrumentDetector:
         model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         dtype: torch.dtype = torch.bfloat16,
         device: str = "cuda",
+        # vLLM flag
+        use_vllm: bool = False,
+        # vLLM-specific params
+        tensor_parallel_size: Optional[int] = None,
+        gpu_memory_utilization: float = 0.95,
+        max_model_len: int = 32768,
+        max_num_seqs: int = 8,
+        seed: int = 1234,
     ):
         self.model_name = model_name
         self.dtype = dtype
         self.device = device
-        self.model = None
+        self.use_vllm = use_vllm
+
+        # vLLM params
+        self.tensor_parallel_size = tensor_parallel_size
+        self.gpu_memory_utilization = gpu_memory_utilization
+        self.max_model_len = max_model_len
+        self.max_num_seqs = max_num_seqs
+        self.seed = seed
+
+        # Will be set by load methods
+        self.model = None  # HF model
+        self.llm = None  # vLLM engine
         self.processor = None
 
         self.load()
 
     def load(self) -> None:
-        """Load the model and processor."""
+        """Load the model using appropriate backend."""
+        if self.use_vllm:
+            self._load_vllm()
+        else:
+            self._load_hf()
+
+    def _load_hf(self) -> None:
+        """Load model using HuggingFace transformers."""
         from src.models.load_qwen import load_model_and_processor
 
         self.model, self.processor = load_model_and_processor(
@@ -39,17 +77,48 @@ class QwenOmniInstrumentDetector:
         )
         self.model.eval()
 
+    def _load_vllm(self) -> None:
+        """Load model using vLLM engine."""
+        from vllm import LLM
+        from transformers import Qwen3OmniMoeProcessor
+
+        tp_size = self.tensor_parallel_size or torch.cuda.device_count()
+
+        self.llm = LLM(
+            model=self.model_name,
+            trust_remote_code=True,
+            gpu_memory_utilization=self.gpu_memory_utilization,
+            tensor_parallel_size=tp_size,
+            limit_mm_per_prompt={"audio": 1},
+            max_num_seqs=self.max_num_seqs,
+            max_model_len=self.max_model_len,
+            seed=self.seed,
+        )
+
+        self.processor = Qwen3OmniMoeProcessor.from_pretrained(self.model_name)
+
     def unload(self) -> None:
         """Unload model and free memory."""
-        if self.model is not None:
-            del self.model
-            del self.processor
-            self.model = None
-            self.processor = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        if self.use_vllm:
+            if self.llm is not None:
+                del self.llm
+                self.llm = None
+        else:
+            if self.model is not None:
+                del self.model
+                self.model = None
 
-    def process_hf_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        if self.processor is not None:
+            del self.processor
+            self.processor = None
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # ==================== HuggingFace Methods ====================
+
+    def _process_hf_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Move HF inputs to device with correct dtype."""
         processed_inputs = {}
         for k, v in inputs.items():
             if isinstance(v, torch.Tensor):
@@ -61,11 +130,11 @@ class QwenOmniInstrumentDetector:
                 processed_inputs[k] = v
         return processed_inputs
 
-    def generate(
-        self, inputs: Dict[str, Any], generate_kwargs: Dict[str, Any] = {}
+    def _generate_hf(
+        self, inputs: Dict[str, Any], generate_kwargs: Dict[str, Any]
     ) -> List[str]:
-        """Single-step generation for instrument detection."""
-        processed_inputs = self.process_hf_inputs(inputs)
+        """Generate using HuggingFace transformers."""
+        processed_inputs = self._process_hf_inputs(inputs)
         text_ids, _ = self.model.generate(**processed_inputs, **generate_kwargs)
         generated_ids = text_ids[:, inputs["input_ids"].shape[1] :]
         responses: List[str] = self.processor.batch_decode(
@@ -73,10 +142,90 @@ class QwenOmniInstrumentDetector:
         )
         return responses
 
+    # ==================== vLLM Methods ====================
+
+    def _build_vllm_input(
+        self, waveform: np.ndarray, conversation: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Build a single vLLM input dict from a waveform and conversation."""
+        prompt = self.processor.apply_chat_template(
+            conversation,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+        return {
+            "prompt": prompt,
+            "multi_modal_data": {
+                "audio": [waveform],
+            },
+            "mm_processor_kwargs": {},
+        }
+
+    def _build_vllm_inputs(self, waveforms: List[np.ndarray]) -> List[Dict[str, Any]]:
+        """Build vLLM inputs for a batch of waveforms."""
+        inputs = []
+        for waveform in waveforms:
+            conversation = self.DATASET_CLS.get_conversation(waveform)
+            inputs.append(self._build_vllm_input(waveform, conversation))
+        return inputs
+
+    def _generate_vllm(
+        self, waveforms: List[np.ndarray], sampling_kwargs: Dict[str, Any]
+    ) -> List[str]:
+        """Generate using vLLM engine."""
+        from vllm import SamplingParams
+
+        inputs = self._build_vllm_inputs(waveforms)
+        sampling_params = SamplingParams(**sampling_kwargs)
+        outputs = self.llm.generate(inputs, sampling_params=sampling_params)
+        responses = [output.outputs[0].text for output in outputs]
+        return responses
+
+    # ==================== Public Generate Method ====================
+
+    def generate(
+        self,
+        inputs: Optional[Dict[str, Any]] = None,
+        waveforms: Optional[List[np.ndarray]] = None,
+        generate_kwargs: Optional[Dict[str, Any]] = None,
+        sampling_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        """
+        Generate instrument predictions.
+
+        For HuggingFace backend:
+            - Pass `inputs` (tokenized HF inputs) and optionally `generate_kwargs`
+
+        For vLLM backend:
+            - Pass `waveforms` (list of numpy arrays) and optionally `sampling_kwargs`
+
+        Args:
+            inputs: Tokenized HF inputs (for HF backend)
+            waveforms: List of audio waveforms (for vLLM backend)
+            generate_kwargs: HF generate kwargs (max_new_tokens, do_sample, etc.)
+            sampling_kwargs: vLLM SamplingParams kwargs (temperature, max_tokens, etc.)
+
+        Returns:
+            List of model response strings
+        """
+        if self.use_vllm:
+            if waveforms is None:
+                raise ValueError("waveforms required for vLLM backend")
+            kwargs = sampling_kwargs or {"temperature": 0.0, "max_tokens": 256}
+            return self._generate_vllm(waveforms, kwargs)
+        else:
+            if inputs is None:
+                raise ValueError("inputs required for HuggingFace backend")
+            kwargs = generate_kwargs or {}
+            return self._generate_hf(inputs, kwargs)
+
 
 class QwenOmniCoTInstrumentDetector(QwenOmniInstrumentDetector):
     """
     Qwen-based instrument detector using chain-of-thought prompting.
+
+    Supports both HuggingFace transformers and vLLM backends.
 
     Two-step approach:
     1. Planning: Describe sounds in background/middle-ground/foreground layers
@@ -88,33 +237,18 @@ class QwenOmniCoTInstrumentDetector(QwenOmniInstrumentDetector):
     # Override dataset class for CoT prompts
     DATASET_CLS = QwenOmniCoTDataset
 
-    def generate(
+    # ==================== HuggingFace CoT Generate ====================
+
+    def _generate_cot_hf(
         self,
         waveforms: List[np.ndarray],
         inputs: Dict[str, Any],
-        planning_generate_kwargs: Optional[Dict[str, Any]] = None,
-        response_generate_kwargs: Optional[Dict[str, Any]] = None,
+        planning_kwargs: Dict[str, Any],
+        response_kwargs: Dict[str, Any],
     ) -> tuple[List[str], List[str]]:
-        """
-        Two-step chain-of-thought generation for instrument detection.
-
-        Step 1: Describe what's heard in each layer (uses planning_generate_kwargs)
-        Step 2: Convert descriptions to structured JSON (uses response_generate_kwargs)
-
-        Args:
-            waveforms: List of audio waveforms for step 2 conversation building
-            inputs: Tokenized inputs for step 1
-            planning_generate_kwargs: Generation kwargs for step 1 (planning/description)
-            response_generate_kwargs: Generation kwargs for step 2 (JSON response)
-
-        Returns:
-            Tuple of (planning_responses, final_responses)
-        """
-        planning_kwargs = planning_generate_kwargs or {}
-        response_kwargs = response_generate_kwargs or {}
-
+        """Two-step CoT generation using HuggingFace."""
         # Step 1: Get layer descriptions
-        step_1_responses = super().generate(inputs, planning_kwargs)
+        step_1_responses = self._generate_hf(inputs, planning_kwargs)
 
         # Step 2: Build conversations using dataset's conversation builder
         conversations = [
@@ -130,6 +264,96 @@ class QwenOmniCoTInstrumentDetector(QwenOmniInstrumentDetector):
             return_dict=True,
         )
 
-        step_2_responses = super().generate(inputs_step_2, response_kwargs)
+        step_2_responses = self._generate_hf(inputs_step_2, response_kwargs)
 
         return step_1_responses, step_2_responses
+
+    # ==================== vLLM CoT Generate ====================
+
+    def _generate_cot_vllm(
+        self,
+        waveforms: List[np.ndarray],
+        planning_kwargs: Dict[str, Any],
+        response_kwargs: Dict[str, Any],
+    ) -> tuple[List[str], List[str]]:
+        """Two-step CoT generation using vLLM."""
+        from vllm import SamplingParams
+
+        # Step 1: Build inputs for planning
+        step_1_inputs = self._build_vllm_inputs(waveforms)
+
+        # Generate step 1
+        planning_params = SamplingParams(**planning_kwargs)
+        step_1_outputs = self.llm.generate(
+            step_1_inputs, sampling_params=planning_params
+        )
+        planning_responses = [output.outputs[0].text for output in step_1_outputs]
+
+        # Step 2: Build inputs using step 1 responses
+        step_2_inputs = []
+        for waveform, planning_response in zip(waveforms, planning_responses):
+            conversation = self.DATASET_CLS.get_step_2_conversation(
+                waveform, planning_response
+            )
+            step_2_inputs.append(self._build_vllm_input(waveform, conversation))
+
+        # Generate step 2
+        response_params = SamplingParams(**response_kwargs)
+        step_2_outputs = self.llm.generate(
+            step_2_inputs, sampling_params=response_params
+        )
+        final_responses = [output.outputs[0].text for output in step_2_outputs]
+
+        return planning_responses, final_responses
+
+    # ==================== Public Generate Method ====================
+
+    def generate(
+        self,
+        waveforms: List[np.ndarray],
+        inputs: Optional[Dict[str, Any]] = None,
+        # HF kwargs
+        planning_generate_kwargs: Optional[Dict[str, Any]] = None,
+        response_generate_kwargs: Optional[Dict[str, Any]] = None,
+        # vLLM kwargs
+        planning_sampling_kwargs: Optional[Dict[str, Any]] = None,
+        response_sampling_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> tuple[List[str], List[str]]:
+        """
+        Two-step chain-of-thought generation for instrument detection.
+
+        For HuggingFace backend:
+            - Pass `waveforms`, `inputs`, and optionally `planning_generate_kwargs`/`response_generate_kwargs`
+
+        For vLLM backend:
+            - Pass `waveforms` and optionally `planning_sampling_kwargs`/`response_sampling_kwargs`
+
+        Args:
+            waveforms: List of audio waveforms (required for both backends)
+            inputs: Tokenized HF inputs for step 1 (required for HF backend)
+            planning_generate_kwargs: HF generate kwargs for step 1
+            response_generate_kwargs: HF generate kwargs for step 2
+            planning_sampling_kwargs: vLLM SamplingParams kwargs for step 1
+            response_sampling_kwargs: vLLM SamplingParams kwargs for step 2
+
+        Returns:
+            Tuple of (planning_responses, final_responses)
+        """
+        if self.use_vllm:
+            planning_kwargs = planning_sampling_kwargs or {
+                "temperature": 0.0,
+                "max_tokens": 1024,
+            }
+            response_kwargs = response_sampling_kwargs or {
+                "temperature": 0.0,
+                "max_tokens": 256,
+            }
+            return self._generate_cot_vllm(waveforms, planning_kwargs, response_kwargs)
+        else:
+            if inputs is None:
+                raise ValueError("inputs required for HuggingFace backend")
+            planning_kwargs = planning_generate_kwargs or {}
+            response_kwargs = response_generate_kwargs or {}
+            return self._generate_cot_hf(
+                waveforms, inputs, planning_kwargs, response_kwargs
+            )
