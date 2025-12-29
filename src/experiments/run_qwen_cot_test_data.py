@@ -12,6 +12,18 @@ import argparse
 from src.data import QwenOmniCoTDataset
 from src.models.qwen_instrument_detector import QwenOmniCoTInstrumentDetector
 
+DEFAULT_GENERATE_KWARGS = {
+    "max_new_tokens": 256,
+    "do_sample": False,
+    "return_audio": False,
+}
+
+DEFAULT_COT_GENERATE_KWARGS = {
+    "max_new_tokens": 1024,
+    "do_sample": False,
+    "return_audio": False,
+}
+
 
 def identity_collate(x):
     """Collate function that returns first element (dataset already batches)."""
@@ -69,12 +81,6 @@ def main(args):
     )
     logger.info(f"DataLoader: {num_workers} workers, prefetch_factor=2")
 
-    generate_kwargs = {
-        "max_new_tokens": 512,
-        "do_sample": False,
-        "return_audio": False,
-    }
-
     results = []
     start_time = time.time()
 
@@ -90,8 +96,8 @@ def main(args):
                 planning_responses, final_responses = detector.generate(
                     waveforms=waveforms,
                     inputs=inputs,
-                    planning_generate_kwargs=generate_kwargs,
-                    response_generate_kwargs=generate_kwargs,
+                    planning_generate_kwargs=DEFAULT_COT_GENERATE_KWARGS,
+                    response_generate_kwargs=DEFAULT_GENERATE_KWARGS,
                 )
             except Exception as e:
                 logger.error(f"Error generating: {e}")
