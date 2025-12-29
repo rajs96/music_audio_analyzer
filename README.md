@@ -16,7 +16,7 @@ docker buildx build \
     -t $(YOUR_IMAGE_TAG) \
     .
 ```
-
+Then, run vLLM inference with your desired audio files and results
 ```bash
 python src/experiments/run_vllm_cot_test_data.py --data_dir your_audio_files/ --batch_size 4 --results_dir results_dir/
 ```
