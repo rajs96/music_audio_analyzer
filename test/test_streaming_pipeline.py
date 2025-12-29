@@ -33,6 +33,7 @@ from src.pipelines.instrument_detection.agents.audio_preprocessor import (
 )
 from src.pipelines.instrument_detection.agents.instrument_detector import (
     InstrumentDetectorAgent,
+    InstrumentDetectorCoTAgent,
 )
 from src.pipelines.instrument_detection.data_classes import InstrumentDetectJob
 from src.models import load_model_and_processor
@@ -244,9 +245,19 @@ def main(
     cache_dir: str = DEFAULT_CACHE_DIR,
     skip_cache: bool = False,
     dtype: torch.dtype = torch.bfloat16,
+    # vLLM config
+    use_vllm: bool = False,
+    use_cot: bool = False,
+    tensor_parallel_size: int = None,
+    gpu_memory_utilization: float = 0.95,
+    max_model_len: int = 32768,
+    max_num_seqs: int = 8,
 ):
-    # Cache model before initializing Ray
-    if not skip_cache:
+    # Cache model before initializing Ray (skip for vLLM - it handles caching)
+    if use_vllm:
+        model_path = model_name
+        logger.info(f"Using vLLM backend, model: {model_path}")
+    elif not skip_cache:
         logger.info("Caching model before starting pipeline...")
         model_path = cache_model(model_name, dtype, cache_dir)
         logger.info(f"Using cached model at: {model_path}")
@@ -316,8 +327,30 @@ def main(
         name="AudioPreprocessor",
     )
 
+    # Choose agent class based on use_cot flag
+    if use_cot:
+        detector_agent = InstrumentDetectorCoTAgent(
+            model_name=model_path,
+            dtype=dtype,
+            use_vllm=use_vllm,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
+        )
+    else:
+        detector_agent = InstrumentDetectorAgent(
+            model_name=model_path,
+            dtype=dtype,
+            use_vllm=use_vllm,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
+        )
+
     detector_stage = AgentStage(
-        agent=InstrumentDetectorAgent(model_name=model_path, dtype=dtype),
+        agent=detector_agent,
         config=AgentRayComputeConfig(
             num_actors=num_detector_actors,
             batch_size=detector_batch_size,
@@ -389,6 +422,14 @@ def main(
                             logger.warning(
                                 f"Result: {result['filename']} → ERROR: {result['error']}"
                             )
+                        elif result.get("background") is not None:
+                            # CoT output with layers
+                            logger.info(
+                                f"Result: {result['filename']} → "
+                                f"BG: {result.get('background', [])}, "
+                                f"MG: {result.get('middle_ground', [])}, "
+                                f"FG: {result.get('foreground', [])}"
+                            )
                         else:
                             logger.info(
                                 f"Result: {result['filename']} → {result['instruments']}"
@@ -441,7 +482,13 @@ def main(
     # Show sample results
     logger.info("\nSample results:")
     for result in successful[:5]:
-        logger.info(f"  - {result['filename']}: {result['instruments']}")
+        if result.get("background") is not None:
+            logger.info(
+                f"  - {result['filename']}: BG={result.get('background', [])}, "
+                f"MG={result.get('middle_ground', [])}, FG={result.get('foreground', [])}"
+            )
+        else:
+            logger.info(f"  - {result['filename']}: {result['instruments']}")
 
     # Show errors if any
     if failed:
@@ -542,9 +589,45 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dtype",
         type=str,
-        default="float32",
+        default="bfloat16",
         choices=["float32", "float16", "bfloat16"],
         help="Model dtype (float32, float16, bfloat16)",
+    )
+
+    # vLLM options
+    parser.add_argument(
+        "--use-vllm",
+        action="store_true",
+        help="Use vLLM backend instead of HuggingFace",
+    )
+    parser.add_argument(
+        "--use-cot",
+        action="store_true",
+        help="Use chain-of-thought (CoT) agent for layered detection",
+    )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        type=int,
+        default=None,
+        help="Number of GPUs for tensor parallelism (default: auto)",
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.95,
+        help="GPU memory utilization for vLLM (0.0-1.0)",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=32768,
+        help="Maximum model context length for vLLM",
+    )
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=8,
+        help="Maximum number of sequences for vLLM",
     )
 
     args = parser.parse_args()
@@ -559,6 +642,8 @@ Streaming Pipeline Configuration:
   Model: {args.model}
   Cache: dir={args.cache_dir}, skip_cache={args.skip_cache}
   Dtype: {args.dtype}
+  Backend: {"vLLM" if args.use_vllm else "HuggingFace"}, CoT: {args.use_cot}
+  vLLM: tp_size={args.tensor_parallel_size}, gpu_mem={args.gpu_memory_utilization}, max_model_len={args.max_model_len}, max_num_seqs={args.max_num_seqs}
 """
     )
 
@@ -583,4 +668,11 @@ Streaming Pipeline Configuration:
         cache_dir=args.cache_dir,
         skip_cache=args.skip_cache,
         dtype=DTYPE_MAP[args.dtype],
+        # vLLM options
+        use_vllm=args.use_vllm,
+        use_cot=args.use_cot,
+        tensor_parallel_size=args.tensor_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
+        max_num_seqs=args.max_num_seqs,
     )

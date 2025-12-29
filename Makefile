@@ -84,6 +84,7 @@ build_amd_runpods:
 build_vllm_h100:
 	docker buildx build \
 		--platform linux/amd64 \
+		--no-cache \
 		-f Dockerfile_vllm_h100 \
 		-t $(VLLM_H100_FULL_TAG) \
 		.

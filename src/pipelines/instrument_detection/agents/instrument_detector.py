@@ -18,17 +18,39 @@ from src.models.qwen_instrument_detector import (
     QwenOmniCoTInstrumentDetector,
 )
 
-# Default generation kwargs
+# Default generation kwargs (HuggingFace)
 DEFAULT_GENERATE_KWARGS = {
     "max_new_tokens": 256,
     "do_sample": False,
     "return_audio": False,
 }
 
-DEFAULT_COT_GENERATE_KWARGS = {
-    "max_new_tokens": 512,
+DEFAULT_COT_PLANNING_GENERATE_KWARGS = {
+    "max_new_tokens": 256,
     "do_sample": False,
     "return_audio": False,
+}
+
+DEFAULT_COT_RESPONSE_GENERATE_KWARGS = {
+    "max_new_tokens": 128,
+    "do_sample": False,
+    "return_audio": False,
+}
+
+# Default sampling kwargs (vLLM)
+DEFAULT_VLLM_SAMPLING_KWARGS = {
+    "temperature": 0.0,
+    "max_tokens": 256,
+}
+
+DEFAULT_VLLM_COT_PLANNING_KWARGS = {
+    "temperature": 0.0,
+    "max_tokens": 256,
+}
+
+DEFAULT_VLLM_COT_RESPONSE_KWARGS = {
+    "temperature": 0.0,
+    "max_tokens": 128,
 }
 
 
@@ -67,11 +89,28 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         dtype: torch.dtype = torch.bfloat16,
         generate_kwargs: Optional[Dict[str, Any]] = None,
+        # vLLM options
+        use_vllm: bool = False,
+        sampling_kwargs: Optional[Dict[str, Any]] = None,
+        tensor_parallel_size: Optional[int] = None,
+        gpu_memory_utilization: float = 0.95,
+        max_model_len: int = 32768,
+        max_num_seqs: int = 8,
     ):
         super().__init__()
         self.model_name = model_name
         self.dtype = dtype
+        self.use_vllm = use_vllm
+
+        # HF kwargs
         self.generate_kwargs = generate_kwargs or DEFAULT_GENERATE_KWARGS.copy()
+
+        # vLLM kwargs
+        self.sampling_kwargs = sampling_kwargs or DEFAULT_VLLM_SAMPLING_KWARGS.copy()
+        self.tensor_parallel_size = tensor_parallel_size
+        self.gpu_memory_utilization = gpu_memory_utilization
+        self.max_model_len = max_model_len
+        self.max_num_seqs = max_num_seqs
 
         # Will be initialized in setup()
         self.detector: QwenOmniInstrumentDetector = None
@@ -84,17 +123,29 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
     def setup(self) -> None:
         """Load the detector - called once per actor."""
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        backend = "vLLM" if self.use_vllm else "HuggingFace"
         logger.info(
             f"{self.__class__.__name__} loading detector {self.model_name} "
-            f"on {device} with dtype={self.dtype}"
+            f"on {device} with dtype={self.dtype}, backend={backend}"
         )
 
-        self.detector = self.DETECTOR_CLS(
-            model_name=self.model_name,
-            dtype=self.dtype,
-            device=device,
-        )
-        logger.info(f"{self.__class__.__name__} detector loaded")
+        if self.use_vllm:
+            self.detector = self.DETECTOR_CLS(
+                model_name=self.model_name,
+                dtype=self.dtype,
+                use_vllm=True,
+                tensor_parallel_size=self.tensor_parallel_size,
+                gpu_memory_utilization=self.gpu_memory_utilization,
+                max_model_len=self.max_model_len,
+                max_num_seqs=self.max_num_seqs,
+            )
+        else:
+            self.detector = self.DETECTOR_CLS(
+                model_name=self.model_name,
+                dtype=self.dtype,
+                device=device,
+            )
+        logger.info(f"{self.__class__.__name__} detector loaded ({backend})")
 
     def teardown(self) -> None:
         """Clean up detector resources."""
@@ -136,11 +187,22 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
 
     def predict_batch_internal(self, waveforms: List[np.ndarray]) -> List[str]:
         """Run inference on a batch of waveforms using detector."""
-        inputs = self.tokenize(waveforms)
-        processed_inputs = self.process_hf_inputs(inputs)
+        if self.use_vllm:
+            # vLLM: pass waveforms directly with sampling kwargs
+            responses = self.detector.generate(
+                waveforms=waveforms,
+                sampling_kwargs=self.sampling_kwargs,
+            )
+        else:
+            # HF: tokenize first, then generate
+            inputs = self.tokenize(waveforms)
+            processed_inputs = self.process_hf_inputs(inputs)
 
-        with torch.no_grad():
-            responses = self.detector.generate(processed_inputs, self.generate_kwargs)
+            with torch.no_grad():
+                responses = self.detector.generate(
+                    inputs=processed_inputs,
+                    generate_kwargs=self.generate_kwargs,
+                )
 
         return responses
 
@@ -314,30 +376,65 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
         dtype: torch.dtype = torch.bfloat16,
         planning_generate_kwargs: Optional[Dict[str, Any]] = None,
         response_generate_kwargs: Optional[Dict[str, Any]] = None,
+        # vLLM options
+        use_vllm: bool = False,
+        planning_sampling_kwargs: Optional[Dict[str, Any]] = None,
+        response_sampling_kwargs: Optional[Dict[str, Any]] = None,
+        tensor_parallel_size: Optional[int] = None,
+        gpu_memory_utilization: float = 0.95,
+        max_model_len: int = 32768,
+        max_num_seqs: int = 8,
     ):
-        # Call parent but don't use its generate_kwargs (CoT uses separate kwargs)
-        super().__init__(model_name=model_name, dtype=dtype)
+        # Call parent with vLLM options
+        super().__init__(
+            model_name=model_name,
+            dtype=dtype,
+            use_vllm=use_vllm,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
+        )
+
+        # HF kwargs
         self.planning_generate_kwargs = (
-            planning_generate_kwargs or DEFAULT_COT_GENERATE_KWARGS.copy()
+            planning_generate_kwargs or DEFAULT_COT_PLANNING_GENERATE_KWARGS.copy()
         )
         self.response_generate_kwargs = (
-            response_generate_kwargs or DEFAULT_COT_GENERATE_KWARGS.copy()
+            response_generate_kwargs or DEFAULT_COT_RESPONSE_GENERATE_KWARGS.copy()
+        )
+
+        # vLLM kwargs
+        self.planning_sampling_kwargs = (
+            planning_sampling_kwargs or DEFAULT_VLLM_COT_PLANNING_KWARGS.copy()
+        )
+        self.response_sampling_kwargs = (
+            response_sampling_kwargs or DEFAULT_VLLM_COT_RESPONSE_KWARGS.copy()
         )
 
     def predict_batch_internal(
         self, waveforms: List[np.ndarray]
     ) -> tuple[List[str], List[str]]:
         """Run two-step CoT inference on a batch of waveforms using detector."""
-        inputs = self.tokenize(waveforms)
-        processed_inputs = self.process_hf_inputs(inputs)
-
-        with torch.no_grad():
+        if self.use_vllm:
+            # vLLM: pass waveforms directly with sampling kwargs
             planning_responses, final_responses = self.detector.generate(
-                waveforms,
-                processed_inputs,
-                planning_generate_kwargs=self.planning_generate_kwargs,
-                response_generate_kwargs=self.response_generate_kwargs,
+                waveforms=waveforms,
+                planning_sampling_kwargs=self.planning_sampling_kwargs,
+                response_sampling_kwargs=self.response_sampling_kwargs,
             )
+        else:
+            # HF: tokenize first, then generate
+            inputs = self.tokenize(waveforms)
+            processed_inputs = self.process_hf_inputs(inputs)
+
+            with torch.no_grad():
+                planning_responses, final_responses = self.detector.generate(
+                    waveforms=waveforms,
+                    inputs=processed_inputs,
+                    planning_generate_kwargs=self.planning_generate_kwargs,
+                    response_generate_kwargs=self.response_generate_kwargs,
+                )
 
         return planning_responses, final_responses
 

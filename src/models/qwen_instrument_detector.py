@@ -90,6 +90,7 @@ class QwenOmniInstrumentDetector:
             max_num_seqs=self.max_num_seqs,
             max_model_len=self.max_model_len,
             seed=self.seed,
+            enforce_eager=True,  # Disable CUDA graphs - more stable, slightly slower
         )
 
         self.processor = Qwen3OmniMoeProcessor.from_pretrained(self.model_name)

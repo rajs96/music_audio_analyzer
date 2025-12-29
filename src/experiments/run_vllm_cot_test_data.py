@@ -19,12 +19,12 @@ from src.models.qwen_instrument_detector import QwenOmniCoTInstrumentDetector
 
 DEFAULT_PLANNING_KWARGS = {
     "temperature": 0.0,
-    "max_tokens": 1024,
+    "max_tokens": 512,
 }
 
 DEFAULT_RESPONSE_KWARGS = {
     "temperature": 0.0,
-    "max_tokens": 256,
+    "max_tokens": 128,
 }
 
 
@@ -98,8 +98,12 @@ def main(args):
 
     # Process in batches
     results = []
-    start_time = time.time()
     total_processed = 0
+
+    # Timing: exclude first batch (warmup)
+    warmup_time = None
+    inference_start_time = None
+    files_after_warmup = 0
 
     # Create batches
     batches = [
@@ -112,6 +116,8 @@ def main(args):
         # Load and decode audio
         filenames = [str(f) for f in batch_files]
         waveforms = [decode_audio(f, target_sr) for f in filenames]
+
+        batch_start = time.time()
 
         # Generate using vLLM CoT detector
         try:
@@ -126,6 +132,18 @@ def main(args):
 
             traceback.print_exc()
             continue
+
+        batch_time = time.time() - batch_start
+
+        # First batch is warmup
+        if batch_idx == 0:
+            warmup_time = batch_time
+            inference_start_time = time.time()
+            logger.info(
+                f"Warmup batch completed in {warmup_time:.1f}s (excluded from avg)"
+            )
+        else:
+            files_after_warmup += len(filenames)
 
         # Parse and collect results
         for filename, planning_response, final_response in zip(
@@ -164,15 +182,25 @@ def main(args):
     results_df.to_csv(output_file, index=False)
     logger.info(f"Results saved to {output_file}")
 
-    end_time = time.time()
+    # Timing stats
     total_files = len(results)
-    elapsed = end_time - start_time
-
-    logger.info(f"Time taken: {elapsed:.1f} seconds")
     logger.info(f"Total files processed: {total_files}")
-    if total_files > 0:
-        logger.info(f"Time per file: {elapsed / total_files:.2f} seconds")
-        logger.info(f"Throughput: {total_files / elapsed:.2f} files/second")
+
+    if warmup_time is not None:
+        logger.info(f"Warmup (first batch): {warmup_time:.1f}s")
+
+    if inference_start_time is not None and files_after_warmup > 0:
+        inference_time = time.time() - inference_start_time
+        logger.info(f"Inference time (excluding warmup): {inference_time:.1f}s")
+        logger.info(f"Files after warmup: {files_after_warmup}")
+        logger.info(
+            f"Avg time per file (excluding warmup): {inference_time / files_after_warmup:.2f}s"
+        )
+        logger.info(
+            f"Throughput (excluding warmup): {files_after_warmup / inference_time:.2f} files/s"
+        )
+    elif total_files > 0:
+        logger.info("Only warmup batch was processed, no inference stats available")
 
     detector.unload()
     logger.info("Done!")
