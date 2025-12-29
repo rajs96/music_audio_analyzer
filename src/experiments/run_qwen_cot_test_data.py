@@ -7,6 +7,7 @@ import time
 import os
 from pathlib import Path
 import pandas as pd
+import argparse
 
 from src.data import QwenOmniCoTDataset
 from src.models.qwen_instrument_detector import QwenOmniCoTInstrumentDetector
@@ -29,16 +30,16 @@ def parse_instruments_json(response: str) -> dict:
     return {"background": [], "middle_ground": [], "foreground": []}
 
 
-def main():
-    model_name = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    data_dir = "audio_files"
-    results_dir = Path("/app/results").resolve()
+def main(args):
+    model_name = args.model_name
+    data_dir = args.data_dir
+    results_dir = Path(args.results_dir).resolve()
     logger.info(f"Results directory: {results_dir}")
     results_dir.mkdir(parents=True, exist_ok=True)
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    batch_size = 4
-    dtype = torch.bfloat16
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    batch_size = args.batch_size
+    dtype = getattr(torch, args.dtype)
+    device = args.device
 
     logger.info(f"Loading model: {model_name}")
     logger.info(f"Device: {device}")
@@ -156,4 +157,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # use command line args
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_dir", type=str, default="eval_audio_files")
+    parser.add_argument("--results_dir", type=str, default="/app/results")
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--dtype", type=str, default="bfloat16")
+    parser.add_argument("--device", type=str, default="cuda")
+    args = parser.parse_args()
+    main(args)

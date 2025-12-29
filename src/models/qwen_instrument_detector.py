@@ -49,6 +49,17 @@ class QwenOmniInstrumentDetector:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+    def process_hf_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        processed_inputs = {}
+        for k, v in inputs.items():
+            if isinstance(v, torch.Tensor):
+                if v.is_floating_point():
+                    processed_inputs[k] = v.to(self.device, dtype=self.dtype)
+                else:
+                    processed_inputs[k] = v.to(self.device)
+            else:
+                processed_inputs[k] = v
+
     def generate(
         self, inputs: Dict[str, Any], generate_kwargs: Dict[str, Any] = {}
     ) -> List[str]:

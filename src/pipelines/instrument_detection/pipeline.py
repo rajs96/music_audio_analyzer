@@ -156,7 +156,7 @@ def create_pipeline(
                 dtype=dtype,
                 device=device,
                 planning_generate_kwargs=DEFAULT_COT_GENERATE_KWARGS,
-                response_generate_kwargs=DEFAULT_COT_GENERATE_KWARGS,
+                response_generate_kwargs=DEFAULT_GENERATE_KWARGS,
             ),
             config=AgentRayComputeConfig(
                 num_actors=num_detectors,
