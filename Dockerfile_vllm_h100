@@ -1,0 +1,42 @@
+FROM nvidia/cuda:12.9.0-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-server \
+    ffmpeg \
+    ca-certificates \
+    git \
+    python3 \
+    python3-pip \
+    python3-dev \
+  && rm -rf /var/lib/apt/lists/* \
+  && ln -s /usr/bin/python3 /usr/bin/python
+
+
+# -----------------------------
+# Install PyTorch + vLLM nightly (CUDA 12.9 wheels)
+# -----------------------------
+RUN pip install --upgrade pip
+
+# Install PyTorch with CUDA 12.9 support
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
+
+# Install vLLM nightly with CUDA 12.9 prebuilt wheels (no compilation needed)
+RUN pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cu129
+
+WORKDIR /app
+
+# Copy requirements first (better layer caching)
+COPY src/pipelines/instrument_detection/requirements_vllm.in /app/requirements_vllm.in
+
+# Compile requirements, strip torch/nvidia/vllm (already installed), install rest
+RUN pip install pip-tools \
+ && pip freeze | grep -E "^(torch|torchaudio|torchvision)==" > /tmp/torch-constraints.txt \
+ && pip-compile requirements_vllm.in -o requirements_vllm.txt \
+ && grep -vE "^(nvidia-|torch==|torchaudio==|torchvision==|triton==|sympy==|vllm==)" requirements_vllm.txt > requirements_vllm-clean.txt \
+ && pip install --no-cache-dir -r requirements_vllm-clean.txt -c /tmp/torch-constraints.txt
+
+# Copy the rest of the app
+COPY . /app
+
+CMD ["tail", "-f", "/dev/null"]

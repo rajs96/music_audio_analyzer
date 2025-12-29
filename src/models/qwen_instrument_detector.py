@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional
 
 from src.data.qwen_omni import QwenOmniDataset, QwenOmniCoTDataset
 
-# Disable vLLM v1 engine (not supported for this model yet)
+# from qwen docs
 os.environ["VLLM_USE_V1"] = "0"
 
 
@@ -33,9 +33,7 @@ class QwenOmniInstrumentDetector:
         model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         dtype: torch.dtype = torch.bfloat16,
         device: str = "cuda",
-        # vLLM flag
         use_vllm: bool = False,
-        # vLLM-specific params
         tensor_parallel_size: Optional[int] = None,
         gpu_memory_utilization: float = 0.95,
         max_model_len: int = 32768,
@@ -47,7 +45,6 @@ class QwenOmniInstrumentDetector:
         self.device = device
         self.use_vllm = use_vllm
 
-        # vLLM params
         self.tensor_parallel_size = tensor_parallel_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.max_model_len = max_model_len
@@ -89,7 +86,7 @@ class QwenOmniInstrumentDetector:
             trust_remote_code=True,
             gpu_memory_utilization=self.gpu_memory_utilization,
             tensor_parallel_size=tp_size,
-            limit_mm_per_prompt={"audio": 1},
+            limit_mm_per_prompt={"audio": 1},  # only one audio per prompt, but batches
             max_num_seqs=self.max_num_seqs,
             max_model_len=self.max_model_len,
             seed=self.seed,
@@ -115,14 +112,13 @@ class QwenOmniInstrumentDetector:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # ==================== HuggingFace Methods ====================
-
     def _process_hf_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """Move HF inputs to device with correct dtype."""
         processed_inputs = {}
         for k, v in inputs.items():
             if isinstance(v, torch.Tensor):
                 if v.is_floating_point():
+                    # there are longs that need stay that way
                     processed_inputs[k] = v.to(self.device, dtype=self.dtype)
                 else:
                     processed_inputs[k] = v.to(self.device)
@@ -141,8 +137,6 @@ class QwenOmniInstrumentDetector:
             generated_ids, skip_special_tokens=True
         )
         return responses
-
-    # ==================== vLLM Methods ====================
 
     def _build_vllm_input(
         self, waveform: np.ndarray, conversation: List[Dict[str, Any]]
@@ -181,8 +175,6 @@ class QwenOmniInstrumentDetector:
         outputs = self.llm.generate(inputs, sampling_params=sampling_params)
         responses = [output.outputs[0].text for output in outputs]
         return responses
-
-    # ==================== Public Generate Method ====================
 
     def generate(
         self,
@@ -229,7 +221,7 @@ class QwenOmniCoTInstrumentDetector(QwenOmniInstrumentDetector):
 
     Two-step approach:
     1. Planning: Describe sounds in background/middle-ground/foreground layers
-    2. Classification: Given descriptions, output structured JSON with instruments
+    2. Detection: Given descriptions, output structured JSON with instruments
 
     Prompts and conversation builders are defined in QwenOmniCoTDataset.
     """

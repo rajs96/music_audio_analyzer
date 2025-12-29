@@ -13,5 +13,5 @@ pillow
 librosa
 torchcodec
 loguru
-vllm==0.6.5
+# vllm installed separately from qwen3_omni fork
 python-multipart

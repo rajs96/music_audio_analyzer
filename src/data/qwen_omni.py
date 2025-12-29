@@ -119,18 +119,35 @@ class QwenOmniCoTDataset(QwenOmniDataset):
     SYSTEM_PROMPT = """You are an expert audio analyst and music producer.
     You understand audio in terms of frequency content, rhythm, and mix placement."""
 
-    STEP_1_PROMPT = """Listen to this audio and describe what you hear in each layer of the mix:
+    STEP_1_PROMPT = """Listen to this audio carefully and describe what you hear in each layer of the mix.
 
-    Background (low-end, rhythm):
-    > What sounds anchor the track? Bass tones, kicks, rhythmic elements.
+    You MUST respond in EXACTLY this format with these three sections:
 
-    Middle-ground (harmonic, textural):
-    > What fills the mix? Chords, pads, rhythmic instruments.
+    **Background (low-end, rhythm):**
+    [Describe the bass, kick drum, and rhythmic foundation you actually hear]
 
-    Foreground (melodic, prominent):
-    > What leads the track? Vocals, solos, main melodies.
+    **Middle-ground (harmonic, textural):**
+    [Describe the chords, pads, and harmonic/textural elements you actually hear]
 
-    Describe each layer in detail."""
+    **Foreground (melodic, prominent):**
+    [Describe the lead vocals, solos, and main melodies you actually hear]
+
+    Example response:
+
+    **Background (low-end, rhythm):**
+    Deep sub bass with a steady pulse, punchy kick drum on the downbeats, crisp hi-hats with a syncopated pattern.
+
+    **Middle-ground (harmonic, textural):**
+    Warm electric piano chords, subtle string pad providing harmonic fill, rhythmic acoustic guitar strumming.
+
+    **Foreground (melodic, prominent):**
+    Soulful male lead vocal with vibrato, occasional brass stabs accenting the melody.
+
+    IMPORTANT:
+    - Only describe sounds you actually hear in the audio
+    - Do not write a general description of the track
+    - Do not classify the genre
+    - Use the exact format above with the three bold headers"""
 
     STEP_2_PROMPT_TEMPLATE = """Based on your analysis:
 
