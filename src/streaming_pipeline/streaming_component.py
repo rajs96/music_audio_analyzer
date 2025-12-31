@@ -269,127 +269,12 @@ class StreamingPipeline:
 
         return kwargs
 
-    def warmup(
-        self,
-        warmup_data_fn: Optional[Callable[[], List[Dict[str, Any]]]] = None,
-        timeout_seconds: float = 300.0,
-    ) -> bool:
-        """
-        Warm up the pipeline by initializing all actor pools.
-
-        This forces Ray Data to create and initialize all actors for each stage
-        before any real data is processed. This is useful when stages involve
-        expensive initialization (e.g., loading ML models).
-
-        Args:
-            warmup_data_fn: Optional function that returns a list of warmup items.
-                           If not provided, uses minimal dummy data.
-            timeout_seconds: Maximum time to wait for warmup (default 5 minutes).
-
-        Returns:
-            True if warmup succeeded, False if it timed out or failed.
-
-        Example:
-            pipeline = StreamingPipeline(datasource, stages)
-
-            # Warmup with custom data
-            def get_warmup_data():
-                return [{"job_id": "warmup", "audio_bytes": b"dummy"}]
-
-            if pipeline.warmup(warmup_data_fn=get_warmup_data):
-                print("Pipeline ready!")
-                for batch in pipeline.stream():
-                    process(batch)
-        """
-        logger.info(f"Starting warmup for pipeline '{self.name}'...")
-        start_time = time.time()
-
-        try:
-            # Generate warmup data
-            if warmup_data_fn is not None:
-                warmup_items = warmup_data_fn()
-            else:
-                # Use minimal dummy data - one item per stage's batch size
-                warmup_items = [{"_warmup": True, "_idx": i} for i in range(2)]
-
-            logger.info(f"Warmup data: {len(warmup_items)} items")
-
-            # Create a warmup dataset from the items
-            warmup_ds = rd.from_items(warmup_items)
-
-            # Apply each stage transformation (same as build, but to warmup data)
-            for stage in self.stages:
-                logger.info(f"Warming up stage: {stage.name}")
-
-                agent = stage.agent
-                agent_class = agent.__class__
-                agent_kwargs = self._extract_init_kwargs(agent)
-
-                callable_class = create_agent_callable(
-                    agent_class=agent_class,
-                    agent_args=(),
-                    agent_kwargs=agent_kwargs,
-                    input_format=stage.input_format,
-                    output_format=stage.output_format,
-                )
-
-                config = stage.config
-
-                compute = rd.ActorPoolStrategy(
-                    size=config.num_actors,
-                    max_tasks_in_flight_per_actor=config.max_concurrency,
-                )
-
-                map_kwargs: Dict[str, Any] = {
-                    "batch_size": config.batch_size,
-                    "compute": compute,
-                    "num_cpus": config.num_cpus,
-                }
-
-                num_bundles = config.get_num_bundles_per_replica()
-                if config.distributed_executor_backend == "ray" and num_bundles > 1:
-                    map_kwargs["num_gpus"] = 0
-                    map_kwargs["ray_remote_args_fn"] = partial(
-                        _create_placement_group_strategy,
-                        num_bundles_per_replica=num_bundles,
-                        accelerator_type=config.accelerator_type,
-                        strategy=config.placement_group_strategy,
-                    )
-                else:
-                    map_kwargs["num_gpus"] = config.get_num_gpus_per_actor()
-
-                if config.accelerator_type:
-                    map_kwargs["accelerator_type"] = config.accelerator_type
-
-                warmup_ds = warmup_ds.map_batches(callable_class, **map_kwargs)
-
-            # Execute the warmup pipeline to force actor initialization
-            # We consume all results to ensure actors are fully initialized
-            warmup_count = 0
-            for batch in warmup_ds.iter_batches(batch_size=1):
-                warmup_count += 1
-                elapsed = time.time() - start_time
-                if elapsed > timeout_seconds:
-                    logger.warning(f"Warmup timed out after {elapsed:.1f}s")
-                    return False
-
-            elapsed = time.time() - start_time
-            logger.info(
-                f"Warmup complete for pipeline '{self.name}' in {elapsed:.1f}s "
-                f"({warmup_count} warmup batches processed)"
-            )
-            return True
-
-        except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(f"Warmup failed after {elapsed:.1f}s: {e}")
-            return False
-
     def stream(self, batch_size: int = 1) -> "StreamingIterator":
         """
-        Start streaming through the pipeline.
+        Start streaming through the pipeline (no warmup).
 
         Returns an iterator that yields batches of results.
+        For warmup support, use warmup_and_stream() instead.
         """
         if self._dataset is None:
             self.build()
@@ -401,27 +286,116 @@ class StreamingPipeline:
         warmup_data_fn: Optional[Callable[[], List[Dict[str, Any]]]] = None,
         warmup_timeout: float = 300.0,
         batch_size: int = 1,
-    ) -> "StreamingIterator":
+    ) -> Iterator[dict]:
         """
         Warm up the pipeline and then start streaming.
 
-        Convenience method that combines warmup() and stream().
+        IMPORTANT: This method uses a SINGLE iter_batches() call to ensure
+        the same Ray Data actors handle both warmup and real data. This is
+        critical for vLLM - the model loads once during warmup, then the
+        same actors (with loaded models) process real data.
+
+        The warmup items are processed first and their results are discarded.
+        After warmup completes, subsequent batches are yielded to the caller.
 
         Args:
             warmup_data_fn: Optional function that returns warmup items.
+                           These should be real, processable items.
             warmup_timeout: Maximum time for warmup in seconds.
             batch_size: Batch size for streaming results.
 
-        Returns:
-            StreamingIterator for consuming results.
+        Yields:
+            Batches of results (after warmup items are consumed).
 
-        Raises:
-            RuntimeError: If warmup fails or times out.
+        Example:
+            def get_warmup_data():
+                return [{"job_id": "warmup", "audio_bytes": real_audio_bytes}]
+
+            for batch in pipeline.warmup_and_stream(warmup_data_fn=get_warmup_data):
+                process(batch)  # Only real results, warmup discarded
         """
-        if not self.warmup(warmup_data_fn, warmup_timeout):
-            raise RuntimeError(f"Pipeline warmup failed for '{self.name}'")
+        if self._dataset is None:
+            self.build()
 
-        return self.stream(batch_size)
+        # Determine warmup count
+        num_warmup = 0
+        if warmup_data_fn is not None:
+            warmup_items = warmup_data_fn()
+            if warmup_items:
+                num_warmup = len(warmup_items)
+
+                # Inject warmup items into the datasource queue
+                if (
+                    hasattr(self.datasource, "_queue")
+                    and self.datasource._queue is not None
+                ):
+                    logger.info(
+                        f"Injecting {num_warmup} warmup items into datasource queue..."
+                    )
+                    for item in warmup_items:
+                        self.datasource._queue.put(item)
+                else:
+                    logger.warning(
+                        "Datasource does not have accessible queue - "
+                        "warmup items cannot be injected. Proceeding without warmup."
+                    )
+                    num_warmup = 0
+
+        # Use generator that handles warmup + streaming with SINGLE iter_batches
+        return self._warmup_streaming_generator(
+            num_warmup=num_warmup,
+            warmup_timeout=warmup_timeout,
+            batch_size=batch_size,
+        )
+
+    def _warmup_streaming_generator(
+        self,
+        num_warmup: int,
+        warmup_timeout: float,
+        batch_size: int,
+    ) -> Iterator[dict]:
+        """
+        Generator that handles warmup then yields real results.
+
+        Uses a SINGLE iter_batches() call to ensure actors stay alive
+        across warmup and real data processing. This is critical for
+        vLLM where model loading happens on first batch.
+        """
+        warmup_count = 0
+        warmup_start = time.time()
+        warmup_complete = num_warmup == 0
+
+        if num_warmup > 0:
+            logger.info(f"Starting warmup with {num_warmup} items...")
+
+        # SINGLE iter_batches call - actors are created ONCE and reused
+        for batch in self._dataset.iter_batches(
+            batch_size=batch_size,
+            prefetch_batches=0,
+        ):
+            if not warmup_complete:
+                # Still in warmup phase - discard results
+                warmup_count += 1
+                elapsed = time.time() - warmup_start
+                logger.info(
+                    f"Warmup progress: {warmup_count}/{num_warmup} ({elapsed:.1f}s)"
+                )
+
+                if elapsed > warmup_timeout:
+                    logger.warning(
+                        f"Warmup timed out after {elapsed:.1f}s - proceeding anyway"
+                    )
+                    warmup_complete = True
+
+                if warmup_count >= num_warmup:
+                    elapsed = time.time() - warmup_start
+                    logger.info(f"Warmup complete in {elapsed:.1f}s - actors ready")
+                    warmup_complete = True
+
+                continue  # Discard warmup batch
+
+            # Warmup complete - yield real results
+            yield batch
 
     def stop(self):
         """Stop the pipeline and clean up resources."""

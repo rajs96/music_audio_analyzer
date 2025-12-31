@@ -47,6 +47,38 @@ DTYPE_MAP = {
 
 # Default cache directory
 DEFAULT_CACHE_DIR = "/app/cache"
+DEFAULT_MODELS_DIR = "/app/models"
+
+
+def download_model_for_vllm(
+    model_name: str, models_dir: str = DEFAULT_MODELS_DIR
+) -> str:
+    """
+    Download model files for vLLM using huggingface_hub snapshot_download.
+    This downloads all model files to a local directory without loading into memory.
+    Returns the path to the downloaded model.
+    """
+    from huggingface_hub import snapshot_download
+
+    model_cache_name = model_name.replace("/", "_")
+    local_path = Path(models_dir) / model_cache_name
+
+    if local_path.exists() and any(local_path.iterdir()):
+        logger.info(f"Model already downloaded at {local_path}")
+        return str(local_path)
+
+    logger.info(f"Downloading model {model_name} to {local_path}...")
+    local_path.mkdir(parents=True, exist_ok=True)
+
+    # Download all model files (weights, config, tokenizer, etc.)
+    snapshot_download(
+        repo_id=model_name,
+        local_dir=str(local_path),
+        local_dir_use_symlinks=False,  # Copy files, don't symlink
+    )
+
+    logger.info(f"Model downloaded successfully to {local_path}")
+    return str(local_path)
 
 
 def cache_model(
@@ -242,6 +274,7 @@ def main(
     # Model config
     model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct",
     cache_dir: str = DEFAULT_CACHE_DIR,
+    models_dir: str = DEFAULT_MODELS_DIR,
     skip_cache: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     # vLLM config
@@ -261,10 +294,14 @@ def main(
             f"--detector-gpus {int(num_detector_actors * detector_num_gpus)} instead."
         )
 
-    # Cache model before initializing Ray (skip for vLLM - it handles caching)
+    # Download/cache model BEFORE initializing Ray
+    # This ensures model files are local before pipeline actors try to load them
     if use_vllm:
-        model_path = model_name
-        logger.info(f"Using vLLM backend, model: {model_path}")
+        logger.info(
+            "Downloading model for vLLM (this may take a while on first run)..."
+        )
+        model_path = download_model_for_vllm(model_name, models_dir)
+        logger.info(f"Using vLLM backend with local model: {model_path}")
     elif not skip_cache:
         logger.info("Caching model before starting pipeline...")
         model_path = cache_model(model_name, dtype, cache_dir)
@@ -390,8 +427,31 @@ def main(
     )
     logger.info("StreamingPipeline created")
 
-    # Warmup the pipeline to initialize actors (especially for model loading)
-    # This ensures at least one actor per stage is ready before processing starts
+    # Setup shutdown handling
+    shutdown_requested = threading.Event()
+
+    def signal_handler(signum, _frame):
+        sig_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+        logger.info(f"Received {sig_name}, initiating shutdown...")
+        shutdown_requested.set()
+        datasource.stop()
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Create the streaming job producer (don't start yet)
+    producer = StreamingJobProducer(
+        job_queue=job_queue,
+        audio_files=audio_files,
+        total_jobs=total_jobs,
+        min_delay_ms=min_delay_ms,
+        max_delay_ms=max_delay_ms,
+        burst_probability=burst_probability,
+        burst_size_min=burst_size_min,
+        burst_size_max=burst_size_max,
+    )
+
+    # Warmup function - creates warmup data from a real audio file
     def get_warmup_data():
         """Create warmup data using a real audio file."""
         warmup_file = audio_files[0]
@@ -406,42 +466,21 @@ def main(
             }
         ]
 
+    # Use warmup_and_stream to ensure the same actors handle both warmup and real data
+    # This is CRITICAL for vLLM - model loads once during warmup, then same actors process real data
     logger.info(
-        "Starting pipeline warmup (this may take a few minutes for model loading)..."
-    )
-    warmup_start = time.time()
-    if pipeline.warmup(warmup_data_fn=get_warmup_data, timeout_seconds=180.0):
-        warmup_time = time.time() - warmup_start
-        logger.info(
-            f"Pipeline warmup complete in {warmup_time:.1f}s - all actors ready!"
-        )
-    else:
-        logger.warning("Pipeline warmup failed or timed out - continuing anyway...")
-
-    # Setup shutdown handling
-    shutdown_requested = threading.Event()
-
-    def signal_handler(signum, _frame):
-        sig_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
-        logger.info(f"Received {sig_name}, initiating shutdown...")
-        shutdown_requested.set()
-        datasource.stop()
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    # Create and start the streaming job producer
-    producer = StreamingJobProducer(
-        job_queue=job_queue,
-        audio_files=audio_files,
-        total_jobs=total_jobs,
-        min_delay_ms=min_delay_ms,
-        max_delay_ms=max_delay_ms,
-        burst_probability=burst_probability,
-        burst_size_min=burst_size_min,
-        burst_size_max=burst_size_max,
+        "Starting warmup_and_stream (model will load on first batch, may take a few minutes)..."
     )
 
+    # Get the streaming iterator with warmup
+    # Warmup items are injected into the queue FIRST
+    streaming_iterator = pipeline.warmup_and_stream(
+        warmup_data_fn=get_warmup_data,
+        warmup_timeout=300.0,
+        batch_size=1,
+    )
+
+    # NOW start the producer - its jobs will come AFTER warmup items in the queue
     logger.info("Starting streaming job producer...")
     producer.start()
 
@@ -450,10 +489,12 @@ def main(
     start_time = time.time()
     last_log_time = start_time
 
-    logger.info("Starting to stream results from pipeline...")
+    logger.info(
+        "Streaming results (warmup items will be processed first and discarded)..."
+    )
 
     try:
-        for batch in pipeline.stream(batch_size=1):
+        for batch in streaming_iterator:
             if shutdown_requested.is_set():
                 break
 
@@ -642,7 +683,13 @@ if __name__ == "__main__":
         "--cache-dir",
         type=str,
         default=DEFAULT_CACHE_DIR,
-        help="Directory to cache models",
+        help="Directory to cache HuggingFace models",
+    )
+    parser.add_argument(
+        "--models-dir",
+        type=str,
+        default=DEFAULT_MODELS_DIR,
+        help="Directory to download vLLM models",
     )
     parser.add_argument(
         "--skip-cache",
@@ -705,7 +752,7 @@ Streaming Pipeline Configuration:
   Preprocessor: num_actors={args.num_preprocessors}, batch={args.prep_batch}, cpus={args.prep_cpus}, concurrency={args.prep_concurrency}
   Detector: num_actors={args.num_detectors}, batch={args.detector_batch}, gpus={args.detector_gpus}, concurrency={args.detector_concurrency}
   Model: {args.model}
-  Cache: dir={args.cache_dir}, skip_cache={args.skip_cache}
+  Cache: cache_dir={args.cache_dir}, models_dir={args.models_dir}, skip_cache={args.skip_cache}
   Dtype: {args.dtype}
   Backend: {"vLLM" if args.use_vllm else "HuggingFace"}, CoT: {args.use_cot}
   vLLM: tp_size={args.tensor_parallel_size}, gpu_mem={args.gpu_memory_utilization}, max_model_len={args.max_model_len}, max_num_seqs={args.max_num_seqs}
@@ -732,6 +779,7 @@ Streaming Pipeline Configuration:
         detector_max_concurrency=args.detector_concurrency,
         model_name=args.model,
         cache_dir=args.cache_dir,
+        models_dir=args.models_dir,
         skip_cache=args.skip_cache,
         dtype=DTYPE_MAP[args.dtype],
         # vLLM options
