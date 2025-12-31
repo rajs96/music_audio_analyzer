@@ -1,0 +1,29 @@
+FROM python:3.10-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    ca-certificates \
+    git \
+    gcc \
+    g++ \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install PyTorch CPU-only (much smaller than CUDA version)
+RUN pip install --upgrade pip \
+ && pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# Copy requirements and install
+COPY src/pipelines/instrument_detection/requirements_preprocessor.in /app/requirements_preprocessor.in
+
+RUN pip install pip-tools \
+ && pip-compile requirements_preprocessor.in -o requirements_preprocessor.txt \
+ && grep -vE "^(torch==|torchaudio==)" requirements_preprocessor.txt > requirements_preprocessor-clean.txt \
+ && pip install --no-cache-dir -r requirements_preprocessor-clean.txt
+
+# Copy the app
+COPY . /app
+
+CMD ["tail", "-f", "/dev/null"]

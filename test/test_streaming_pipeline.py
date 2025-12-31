@@ -99,14 +99,12 @@ def create_job_from_file(filepath: Path) -> InstrumentDetectJob:
     song_hash = hashlib.sha256(audio_bytes).hexdigest()
     created_at = int(time.time())
 
-    audio_ref = ray.put(audio_bytes)
-
     return InstrumentDetectJob(
         job_id=job_id,
         created_at=created_at,
         song_id=song_id,
         song_hash=song_hash,
-        audio_ref=audio_ref,
+        audio_bytes=audio_bytes,  # Pass bytes directly, not ObjectRef
         filename=filepath.name,
     )
 
@@ -118,7 +116,7 @@ def job_to_row(job: InstrumentDetectJob) -> dict:
         "song_id": job.song_id,
         "song_hash": job.song_hash,
         "filename": job.filename,
-        "audio_ref": job.audio_ref,
+        "audio_bytes": job.audio_bytes,  # Pass bytes directly
     }
 
 
@@ -221,6 +219,7 @@ class StreamingJobProducer:
 
 def main(
     # Job producer config
+    data_dir: str = "audio_files",
     total_jobs: int = 50,
     min_delay_ms: int = 100,
     max_delay_ms: int = 2000,
@@ -253,6 +252,15 @@ def main(
     max_model_len: int = 32768,
     max_num_seqs: int = 8,
 ):
+    # Validate vLLM configuration
+    if use_vllm and num_detector_actors > 1:
+        logger.warning(
+            f"WARNING: Using vLLM with {num_detector_actors} detector actors is NOT recommended! "
+            f"Each actor will try to load the full model, causing GPU memory contention. "
+            f"Use --num-detectors 1 --tensor-parallel-size {int(num_detector_actors * detector_num_gpus)} "
+            f"--detector-gpus {int(num_detector_actors * detector_num_gpus)} instead."
+        )
+
     # Cache model before initializing Ray (skip for vLLM - it handles caching)
     if use_vllm:
         model_path = model_name
@@ -291,7 +299,7 @@ def main(
     logger.info("Job queue created")
 
     # Get audio files
-    audio_dir = Path(__file__).parent.parent / "audio_files"
+    audio_dir = Path(__file__).parent.parent / data_dir
     audio_files = [f for f in audio_dir.glob("*.mp3") if f.is_file()]
 
     if not audio_files:
@@ -328,6 +336,8 @@ def main(
     )
 
     # Choose agent class based on use_cot flag
+    # Note: tensor_parallel_size is now passed to both agent and config
+    # The config uses it to calculate num_gpus, the agent passes it to vLLM
     if use_cot:
         detector_agent = InstrumentDetectorCoTAgent(
             model_name=model_path,
@@ -349,14 +359,26 @@ def main(
             max_num_seqs=max_num_seqs,
         )
 
+    # Configure detector stage with tensor parallelism support
+    # When tensor_parallel_size > 1, num_gpus is calculated automatically
+    detector_config = AgentRayComputeConfig(
+        num_actors=num_detector_actors,
+        batch_size=detector_batch_size,
+        num_gpus=detector_num_gpus,  # Used if tensor_parallel_size=1
+        max_concurrency=detector_max_concurrency,
+        # Tensor parallelism - num_gpus will be overridden to tensor_parallel_size
+        tensor_parallel_size=tensor_parallel_size or 1,
+    )
+
+    logger.info(
+        f"Detector config: num_actors={num_detector_actors}, "
+        f"tensor_parallel_size={tensor_parallel_size or 1}, "
+        f"calculated_gpus={detector_config.get_num_gpus_per_actor()}"
+    )
+
     detector_stage = AgentStage(
         agent=detector_agent,
-        config=AgentRayComputeConfig(
-            num_actors=num_detector_actors,
-            batch_size=detector_batch_size,
-            num_gpus=detector_num_gpus,
-            max_concurrency=detector_max_concurrency,
-        ),
+        config=detector_config,
         name="InstrumentDetector",
     )
 
@@ -367,6 +389,34 @@ def main(
         name="InstrumentDetectionPipeline",
     )
     logger.info("StreamingPipeline created")
+
+    # Warmup the pipeline to initialize actors (especially for model loading)
+    # This ensures at least one actor per stage is ready before processing starts
+    def get_warmup_data():
+        """Create warmup data using a real audio file."""
+        warmup_file = audio_files[0]
+        audio_bytes = warmup_file.read_bytes()
+        return [
+            {
+                "job_id": "warmup_001",
+                "song_id": "warmup",
+                "song_hash": "warmup",
+                "filename": warmup_file.name,
+                "audio_bytes": audio_bytes,
+            }
+        ]
+
+    logger.info(
+        "Starting pipeline warmup (this may take a few minutes for model loading)..."
+    )
+    warmup_start = time.time()
+    if pipeline.warmup(warmup_data_fn=get_warmup_data, timeout_seconds=180.0):
+        warmup_time = time.time() - warmup_start
+        logger.info(
+            f"Pipeline warmup complete in {warmup_time:.1f}s - all actors ready!"
+        )
+    else:
+        logger.warning("Pipeline warmup failed or timed out - continuing anyway...")
 
     # Setup shutdown handling
     shutdown_requested = threading.Event()
@@ -510,6 +560,12 @@ if __name__ == "__main__":
 
     # Job producer config
     parser.add_argument(
+        "--data-dir",
+        type=str,
+        default="audio_files",
+        help="Directory to load audio files from",
+    )
+    parser.add_argument(
         "--total-jobs", type=int, default=50, help="Total number of jobs to submit"
     )
     parser.add_argument(
@@ -548,14 +604,23 @@ if __name__ == "__main__":
     )
 
     # Detector config
+    # IMPORTANT: For vLLM with multi-GPU, use 1 detector with tensor parallelism.
+    # DO NOT use multiple detectors with vLLM - each would try to load the full model.
+    # Use: --num-detectors 1 --tensor-parallel-size 4 --detector-gpus 4.0
     parser.add_argument(
-        "--num-detectors", type=int, default=1, help="Number of detector actors"
+        "--num-detectors",
+        type=int,
+        default=1,
+        help="Number of detector actors (use 1 for vLLM multi-GPU)",
     )
     parser.add_argument(
         "--detector-batch", type=int, default=4, help="Detector batch size"
     )
     parser.add_argument(
-        "--detector-gpus", type=float, default=1.0, help="GPUs per detector"
+        "--detector-gpus",
+        type=float,
+        default=1.0,
+        help="GPUs per detector (set to num_gpus for tensor parallelism)",
     )
     parser.add_argument(
         "--detector-concurrency",
@@ -648,6 +713,7 @@ Streaming Pipeline Configuration:
     )
 
     main(
+        data_dir=args.data_dir,
         total_jobs=args.total_jobs,
         min_delay_ms=args.min_delay,
         max_delay_ms=args.max_delay,

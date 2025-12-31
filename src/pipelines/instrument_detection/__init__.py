@@ -74,7 +74,16 @@ from .pipeline import (
     result_from_row,
     cot_result_from_row,
 )
-from .file_uploader import FileUploader
+
+
+def __getattr__(name):
+    """Lazy import for FileUploader to avoid pickling issues with Ray Serve decorator."""
+    if name == "FileUploader":
+        from .file_uploader import FileUploader
+
+        return FileUploader
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     # Data classes

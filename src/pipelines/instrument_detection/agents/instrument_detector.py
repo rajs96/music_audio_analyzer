@@ -93,6 +93,8 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         use_vllm: bool = False,
         sampling_kwargs: Optional[Dict[str, Any]] = None,
         tensor_parallel_size: Optional[int] = None,
+        pipeline_parallel_size: int = 1,
+        distributed_executor_backend: str = "mp",
         gpu_memory_utilization: float = 0.95,
         max_model_len: int = 32768,
         max_num_seqs: int = 8,
@@ -108,6 +110,8 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         # vLLM kwargs
         self.sampling_kwargs = sampling_kwargs or DEFAULT_VLLM_SAMPLING_KWARGS.copy()
         self.tensor_parallel_size = tensor_parallel_size
+        self.pipeline_parallel_size = pipeline_parallel_size
+        self.distributed_executor_backend = distributed_executor_backend
         self.gpu_memory_utilization = gpu_memory_utilization
         self.max_model_len = max_model_len
         self.max_num_seqs = max_num_seqs
@@ -130,11 +134,17 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         )
 
         if self.use_vllm:
+            logger.info(
+                f"vLLM config: tp={self.tensor_parallel_size}, pp={self.pipeline_parallel_size}, "
+                f"backend={self.distributed_executor_backend}"
+            )
             self.detector = self.DETECTOR_CLS(
                 model_name=self.model_name,
                 dtype=self.dtype,
                 use_vllm=True,
                 tensor_parallel_size=self.tensor_parallel_size,
+                pipeline_parallel_size=self.pipeline_parallel_size,
+                distributed_executor_backend=self.distributed_executor_backend,
                 gpu_memory_utilization=self.gpu_memory_utilization,
                 max_model_len=self.max_model_len,
                 max_num_seqs=self.max_num_seqs,
@@ -381,6 +391,8 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
         planning_sampling_kwargs: Optional[Dict[str, Any]] = None,
         response_sampling_kwargs: Optional[Dict[str, Any]] = None,
         tensor_parallel_size: Optional[int] = None,
+        pipeline_parallel_size: int = 1,
+        distributed_executor_backend: str = "mp",
         gpu_memory_utilization: float = 0.95,
         max_model_len: int = 32768,
         max_num_seqs: int = 8,
@@ -391,6 +403,8 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
             dtype=dtype,
             use_vllm=use_vllm,
             tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=max_model_len,
             max_num_seqs=max_num_seqs,
@@ -514,6 +528,7 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
 
     def process_batch(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Process a batch of preprocessed audio through the CoT detector."""
+        logger.info(f"InstrumentDetectorCoT received batch of {len(items)} items")
         if not items:
             return []
 
@@ -523,9 +538,13 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
         results, valid_items, valid_waveforms = self._get_waveforms_from_items(
             items, now
         )
+        logger.info(f"Extracted {len(valid_waveforms)} valid waveforms from batch")
 
         # Run inference on valid items
         if valid_waveforms:
+            logger.info(
+                f"Starting vLLM inference on {len(valid_waveforms)} waveforms..."
+            )
             inference_start = time.time()
             planning_responses, final_responses = self.predict_batch_internal(
                 valid_waveforms

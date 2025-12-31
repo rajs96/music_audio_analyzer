@@ -35,6 +35,8 @@ class QwenOmniInstrumentDetector:
         device: str = "cuda",
         use_vllm: bool = False,
         tensor_parallel_size: Optional[int] = None,
+        pipeline_parallel_size: int = 1,
+        distributed_executor_backend: str = "mp",
         gpu_memory_utilization: float = 0.95,
         max_model_len: int = 32768,
         max_num_seqs: int = 8,
@@ -46,6 +48,8 @@ class QwenOmniInstrumentDetector:
         self.use_vllm = use_vllm
 
         self.tensor_parallel_size = tensor_parallel_size
+        self.pipeline_parallel_size = pipeline_parallel_size
+        self.distributed_executor_backend = distributed_executor_backend
         self.gpu_memory_utilization = gpu_memory_utilization
         self.max_model_len = max_model_len
         self.max_num_seqs = max_num_seqs
@@ -78,14 +82,23 @@ class QwenOmniInstrumentDetector:
         """Load model using vLLM engine."""
         from vllm import LLM
         from transformers import Qwen3OmniMoeProcessor
+        from loguru import logger
 
         tp_size = self.tensor_parallel_size or torch.cuda.device_count()
+        pp_size = self.pipeline_parallel_size
+
+        logger.info(
+            f"Loading vLLM engine: model={self.model_name}, "
+            f"tp={tp_size}, pp={pp_size}, backend={self.distributed_executor_backend}"
+        )
 
         self.llm = LLM(
             model=self.model_name,
             trust_remote_code=True,
             gpu_memory_utilization=self.gpu_memory_utilization,
             tensor_parallel_size=tp_size,
+            pipeline_parallel_size=pp_size,
+            distributed_executor_backend=self.distributed_executor_backend,
             limit_mm_per_prompt={"audio": 1},  # only one audio per prompt, but batches
             max_num_seqs=self.max_num_seqs,
             max_model_len=self.max_model_len,
@@ -271,16 +284,27 @@ class QwenOmniCoTInstrumentDetector(QwenOmniInstrumentDetector):
     ) -> tuple[List[str], List[str]]:
         """Two-step CoT generation using vLLM."""
         from vllm import SamplingParams
+        from loguru import logger
 
         # Step 1: Build inputs for planning
         step_1_inputs = self._build_vllm_inputs(waveforms)
 
+        # Log audio durations for debugging
+        for i, wf in enumerate(waveforms):
+            duration_sec = len(wf) / 16000  # assuming 16kHz
+            logger.debug(f"  Waveform {i}: {duration_sec:.1f}s ({len(wf)} samples)")
+
         # Generate step 1
+        logger.debug(f"Step 1: Generating planning for {len(waveforms)} waveforms...")
         planning_params = SamplingParams(**planning_kwargs)
         step_1_outputs = self.llm.generate(
             step_1_inputs, sampling_params=planning_params
         )
         planning_responses = [output.outputs[0].text for output in step_1_outputs]
+
+        # Log planning response lengths
+        for i, resp in enumerate(planning_responses):
+            logger.debug(f"  Planning {i}: {len(resp)} chars")
 
         # Step 2: Build inputs using step 1 responses
         step_2_inputs = []
@@ -290,7 +314,12 @@ class QwenOmniCoTInstrumentDetector(QwenOmniInstrumentDetector):
             )
             step_2_inputs.append(self._build_vllm_input(waveform, conversation))
 
+        # Log step 2 prompt lengths
+        for i, inp in enumerate(step_2_inputs):
+            logger.debug(f"  Step2 prompt {i}: {len(inp['prompt'])} chars")
+
         # Generate step 2
+        logger.debug(f"Step 2: Generating final responses...")
         response_params = SamplingParams(**response_kwargs)
         step_2_outputs = self.llm.generate(
             step_2_inputs, sampling_params=response_params

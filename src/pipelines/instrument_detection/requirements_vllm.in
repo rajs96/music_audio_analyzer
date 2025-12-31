@@ -1,7 +1,7 @@
 pandas
 tqdm
 pyarrow
-transformers
+transformers>=4.54.0
 accelerate==1.1.0
 bitsandbytes
 safetensors
@@ -15,3 +15,10 @@ torchcodec
 loguru
 # vllm installed separately from qwen3_omni fork
 python-multipart
+
+# sam_audio dependencies (non-git deps)
+einops
+pydub
+torchdiffeq
+audiobox_aesthetics
+numpy

@@ -24,20 +24,59 @@ TOutput = TypeVar("TOutput")
 
 @dataclass
 class AgentRayComputeConfig:
-    """Configuration for Ray compute resources and scaling of an Agent."""
+    """Configuration for Ray compute resources and scaling of an Agent.
 
-    # Number of actor replicas
+    For vLLM with tensor/pipeline parallelism:
+        - Set tensor_parallel_size and/or pipeline_parallel_size
+        - num_gpus is calculated automatically as tp_size * pp_size
+        - Use num_actors=1 (one vLLM engine sharded across GPUs)
+        - Use distributed_executor_backend="mp" (default) or "ray" (cross-node)
+
+    Example for 4-GPU tensor parallelism:
+        config = AgentRayComputeConfig(
+            num_actors=1,
+            tensor_parallel_size=4,
+            batch_size=8,
+        )
+    """
+
+    # Number of actor replicas (for vLLM with TP/PP, use 1)
     num_actors: int = 1
     # Batch size for processing
     batch_size: int = 32
     # CPU resources per actor
     num_cpus: float = 1.0
     # GPU resources per actor (0 = no GPU)
+    # NOTE: If tensor_parallel_size or pipeline_parallel_size > 1,
+    # this is automatically set to tp_size * pp_size
     num_gpus: float = 0.0
     # Maximum concurrent tasks per actor
     max_concurrency: int = 1
     # Maximum time (ms) to wait for a full batch
     max_batch_wait_ms: int = 100
+
+    # === vLLM Tensor/Pipeline Parallelism ===
+    # Tensor parallelism: split model layers across GPUs
+    tensor_parallel_size: int = 1
+    # Pipeline parallelism: split model stages across GPUs
+    pipeline_parallel_size: int = 1
+    # Distributed executor backend: "mp" (multiprocessing) or "ray" (cross-node)
+    distributed_executor_backend: str = "mp"
+    # Accelerator type label (e.g., "A100", "H100") for scheduling
+    accelerator_type: Optional[str] = None
+    # Placement group strategy: "PACK", "STRICT_PACK", "SPREAD", "STRICT_SPREAD"
+    placement_group_strategy: str = "PACK"
+
+    def get_num_gpus_per_actor(self) -> float:
+        """Calculate GPUs needed per actor based on parallelism settings."""
+        parallelism_gpus = self.tensor_parallel_size * self.pipeline_parallel_size
+        if parallelism_gpus > 1:
+            return float(parallelism_gpus)
+        return self.num_gpus
+
+    def get_num_bundles_per_replica(self) -> int:
+        """Get number of GPU bundles needed per replica for placement groups."""
+        return self.tensor_parallel_size * self.pipeline_parallel_size
 
 
 class Agent(ABC, Generic[TInput, TOutput]):
@@ -255,6 +294,8 @@ def create_agent_callable(
         """Ray Data compatible wrapper for an Agent."""
 
         def __init__(self):
+            from loguru import logger  # Import inside to avoid closure serialization
+
             self.agent = agent_class(*agent_args, **agent_kwargs)
             self.agent.setup()
             self.agent._is_setup = True
@@ -276,7 +317,26 @@ def create_agent_callable(
 
         def _batch_to_items(self, batch: Dict[str, Any], fmt: str) -> List[Any]:
             """Convert Ray Data batch (dict of columns) to list of items."""
-            from .streaming_datasource import _deserialize_row_from_pyarrow
+            import pickle  # Local import for serialization safety
+
+            def deserialize_row(row):
+                """Deserialize pickled values from PyArrow storage."""
+                deserialized = {}
+                for key, value in row.items():
+                    if isinstance(value, bytes):
+                        if value.startswith(b"__PICKLED_OBJREF__"):
+                            deserialized[key] = pickle.loads(
+                                value[len(b"__PICKLED_OBJREF__") :]
+                            )
+                        elif value.startswith(b"__PICKLED__"):
+                            deserialized[key] = pickle.loads(
+                                value[len(b"__PICKLED__") :]
+                            )
+                        else:
+                            deserialized[key] = value
+                    else:
+                        deserialized[key] = value
+                return deserialized
 
             if not batch:
                 return []
@@ -300,7 +360,7 @@ def create_agent_callable(
             items = [{k: batch[k][i] for k in keys} for i in range(n_items)]
 
             # Deserialize any pickled values (e.g., ObjectRefs)
-            return [_deserialize_row_from_pyarrow(item) for item in items]
+            return [deserialize_row(item) for item in items]
 
         def _items_to_batch(self, items: List[Any], fmt: str) -> Dict[str, Any]:
             """Convert list of items to Ray Data batch (dict of columns)."""

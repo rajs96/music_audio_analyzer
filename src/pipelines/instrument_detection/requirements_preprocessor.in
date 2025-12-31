@@ -1,0 +1,8 @@
+# Preprocessor dependencies (CPU-only, no ML inference)
+torch
+torchaudio
+librosa
+soundfile
+ray[default]
+numpy
+loguru

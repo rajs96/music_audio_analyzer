@@ -1,17 +1,18 @@
 from dataclasses import dataclass, field
-from typing import List
-from ray._raylet import ObjectRef
+from typing import List, Optional
 import numpy as np
 
 
 @dataclass
 class InstrumentDetectJob:
+    """Job containing audio data for instrument detection."""
+
     job_id: str
     created_at: int
     song_id: str
     song_hash: str
-    audio_ref: ObjectRef
     filename: str
+    audio_bytes: Optional[bytes] = None  # Raw audio bytes (preferred for streaming)
 
 
 @dataclass

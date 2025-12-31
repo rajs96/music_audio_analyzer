@@ -72,14 +72,8 @@ def _deserialize_row_from_pyarrow(row: Dict[str, Any]) -> Dict[str, Any]:
     return deserialized
 
 
-# Sentinel object to signal shutdown
-class _StopSentinel:
-    """Sentinel object to signal datasource shutdown."""
-
-    pass
-
-
-STOP_SENTINEL = _StopSentinel()
+# Sentinel value to signal shutdown (use a unique string for serialization compatibility)
+STOP_SENTINEL = "__STREAMING_DATASOURCE_STOP_SENTINEL__"
 
 T = TypeVar("T")  # Input item type
 
@@ -92,13 +86,15 @@ class StreamingDatasourceConfig:
     parallelism: int = 1
 
     # Number of items to batch before yielding a block
-    batch_size: int = 32
+    # Keep small for faster streaming start
+    batch_size: int = 8
 
     # How long to wait (seconds) before yielding a partial batch
-    batch_timeout: float = 0.1
+    # Yield quickly to enable streaming - don't wait for full batch
+    batch_timeout: float = 0.5
 
     # How long to wait (seconds) when source is empty before checking again
-    poll_interval: float = 0.01
+    poll_interval: float = 0.05
 
     # Optional: maximum items to read (None = infinite)
     max_items: Optional[int] = None
@@ -223,8 +219,34 @@ class StreamingDatasource(rd.datasource.Datasource, ABC, Generic[T]):
 
             Uses STOP_SENTINEL in queue for shutdown signaling (no threading.Event).
             """
+            import pickle
+            import numpy as np
             import pyarrow as pa
+            import ray
             from ray.util.queue import Empty
+            from loguru import (
+                logger,
+            )  # Import inside function to avoid closure serialization issues
+
+            # Define serialization inline to avoid module import issues on Ray workers
+            def serialize_row(row):
+                """Serialize a row dict for safe PyArrow table creation."""
+                serialized = {}
+                for key, value in row.items():
+                    if isinstance(value, ray._raylet.ObjectRef):
+                        serialized[key] = b"__PICKLED_OBJREF__" + pickle.dumps(value)
+                    elif isinstance(value, np.ndarray):
+                        serialized[key] = value
+                    elif not isinstance(
+                        value, (str, int, float, bool, bytes, type(None), list)
+                    ):
+                        try:
+                            serialized[key] = b"__PICKLED__" + pickle.dumps(value)
+                        except Exception:
+                            serialized[key] = str(value)
+                    else:
+                        serialized[key] = value
+                return serialized
 
             logger.info(f"Generator started. queue={queue}, max_items={max_items}")
 
@@ -270,7 +292,7 @@ class StreamingDatasource(rd.datasource.Datasource, ABC, Generic[T]):
                             last_log_time = time.time()
                         continue
 
-                    if isinstance(item, _StopSentinel):
+                    if item == "__STREAMING_DATASOURCE_STOP_SENTINEL__":
                         # Clean shutdown signal - but first drain remaining items
                         logger.info(
                             "Received STOP_SENTINEL, draining remaining items..."
@@ -280,13 +302,16 @@ class StreamingDatasource(rd.datasource.Datasource, ABC, Generic[T]):
                         while True:
                             try:
                                 remaining_item = queue.get(timeout=0.1)
-                                if isinstance(remaining_item, _StopSentinel):
+                                if (
+                                    remaining_item
+                                    == "__STREAMING_DATASOURCE_STOP_SENTINEL__"
+                                ):
                                     continue
                                 if isinstance(remaining_item, dict):
                                     row = remaining_item
                                 else:
                                     row = {"data": remaining_item}
-                                serialized_row = _serialize_row_for_pyarrow(row)
+                                serialized_row = serialize_row(row)
                                 batch_rows.append(serialized_row)
                                 items_read += 1
                             except QueueEmpty:
@@ -302,7 +327,7 @@ class StreamingDatasource(rd.datasource.Datasource, ABC, Generic[T]):
                         else:
                             row = {"data": item}
                         # Serialize row for safe PyArrow table creation
-                        serialized_row = _serialize_row_for_pyarrow(row)
+                        serialized_row = serialize_row(row)
                         batch_rows.append(serialized_row)
                         items_read += 1
                     except Exception as e:
@@ -394,7 +419,7 @@ class QueueStreamingDatasource(StreamingDatasource[T]):
             item = self.queue.get(timeout=timeout)
 
             # Check for sentinel
-            if isinstance(item, _StopSentinel):
+            if item == STOP_SENTINEL:
                 return STOP_SENTINEL
 
             return item
