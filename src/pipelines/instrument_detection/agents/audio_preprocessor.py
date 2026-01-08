@@ -4,13 +4,14 @@ Audio Preprocessor Agent.
 Decodes audio bytes to waveforms for downstream processing.
 
 This agent receives audio bytes directly (not ObjectRefs) and outputs
-waveforms as numpy arrays that can be serialized through Ray Data.
+waveform ObjectRefs that can be retrieved with ray.get() in downstream stages.
 """
 
 import tempfile
 from typing import Any, Dict, List
 
 import numpy as np
+import ray
 import torchaudio
 from loguru import logger
 
@@ -36,7 +37,7 @@ class AudioPreprocessorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
             "song_id": str,
             "song_hash": str,
             "filename": str,
-            "waveform": np.ndarray,  # Decoded waveform as numpy array (float32)
+            "waveform_ref": ray.ObjectRef,  # Reference to waveform in object store
             "sample_rate": int,  # Sample rate of the waveform
             "duration_seconds": float,  # Duration in seconds
             "error": Optional[str],  # Error message if preprocessing failed
@@ -103,13 +104,17 @@ class AudioPreprocessorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
                 # Calculate duration
                 duration_seconds = len(waveform) / self.target_sr
 
+                # Store waveform in Ray object store - avoids PyArrow serialization issues
+                # with variable-length arrays between pipeline stages
+                waveform_ref = ray.put(waveform)
+
                 results.append(
                     {
                         "job_id": job_id,
                         "song_id": song_id,
                         "song_hash": song_hash,
                         "filename": filename,
-                        "waveform": waveform,
+                        "waveform_ref": waveform_ref,
                         "sample_rate": self.target_sr,
                         "duration_seconds": duration_seconds,
                         "error": None,
@@ -132,7 +137,7 @@ class AudioPreprocessorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
                         "song_id": song_id,
                         "song_hash": song_hash,
                         "filename": filename,
-                        "waveform": None,
+                        "waveform_ref": None,
                         "sample_rate": None,
                         "duration_seconds": None,
                         "error": error_msg,

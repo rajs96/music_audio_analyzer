@@ -240,26 +240,63 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         valid_items = []
         valid_waveforms = []
 
-        for item in items:
+        for idx, item in enumerate(items):
+            filename = item.get("filename", f"unknown_{idx}")
+
+            # Debug: log item keys and types to trace data flow
+            logger.debug(
+                f"Item {idx} '{filename}' keys: {list(item.keys())}, "
+                f"waveform_ref type: {type(item.get('waveform_ref'))}, "
+                f"waveform type: {type(item.get('waveform'))}"
+            )
+
             # Check if item has an error from preprocessing
             if item.get("error"):
+                logger.warning(
+                    f"Item '{filename}' has preprocessing error: {item['error']}"
+                )
                 results.append(self._create_error_result(item, now, item["error"]))
                 continue
 
             # Get waveform - handle both waveform_ref (ObjectRef) and inline waveform
             try:
+                waveform = None
+
                 if "waveform_ref" in item and item["waveform_ref"] is not None:
-                    waveform = ray.get(item["waveform_ref"])
-                elif "waveform" in item:
+                    waveform_ref = item["waveform_ref"]
+                    logger.debug(
+                        f"Item '{filename}' retrieving waveform_ref: {waveform_ref}"
+                    )
+                    waveform = ray.get(waveform_ref)
+                elif "waveform" in item and item["waveform"] is not None:
                     waveform = item["waveform"]
+                    logger.debug(f"Item '{filename}' using inline waveform")
                 else:
-                    raise ValueError("No waveform or waveform_ref in item")
+                    raise ValueError(
+                        f"No waveform or waveform_ref in item. "
+                        f"Keys: {list(item.keys())}, "
+                        f"waveform_ref={item.get('waveform_ref')}, "
+                        f"waveform={item.get('waveform')}"
+                    )
+
+                # Validate waveform
+                if waveform is None:
+                    raise ValueError("Waveform is None after retrieval")
+                if not isinstance(waveform, np.ndarray):
+                    raise ValueError(f"Waveform is not ndarray, got {type(waveform)}")
+                if waveform.size == 0:
+                    raise ValueError("Waveform is empty (size=0)")
+
+                logger.debug(
+                    f"Item '{filename}' waveform valid: shape={waveform.shape}, "
+                    f"dtype={waveform.dtype}"
+                )
 
                 valid_items.append(item)
                 valid_waveforms.append(waveform)
 
             except Exception as e:
-                logger.error(f"Failed to get waveform for {item.get('filename')}: {e}")
+                logger.error(f"Failed to get waveform for '{filename}': {e}")
                 results.append(
                     self._create_error_result(
                         item, now, f"Failed to retrieve waveform: {str(e)}"

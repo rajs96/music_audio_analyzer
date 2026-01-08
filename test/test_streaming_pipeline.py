@@ -349,6 +349,7 @@ def main(
     # Create the streaming datasource from the job queue
     datasource = QueueStreamingDatasource(
         queue=job_queue,
+        item_to_row_fn=lambda x: x,  # Items are already dicts from job_to_row()
         config=StreamingDatasourceConfig(
             parallelism=datasource_parallelism,
             batch_size=datasource_batch_size,

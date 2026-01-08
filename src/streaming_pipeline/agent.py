@@ -364,20 +364,39 @@ def create_agent_callable(
 
         def _items_to_batch(self, items: List[Any], fmt: str) -> Dict[str, Any]:
             """Convert list of items to Ray Data batch (dict of columns)."""
+            import pickle
+            import ray
+
+            def serialize_value(value):
+                """Serialize ObjectRefs for PyArrow transport between stages.
+
+                PyArrow doesn't natively handle ObjectRefs, and Ray Data's
+                fallback pickling doesn't always work reliably.
+                """
+                if isinstance(value, ray._raylet.ObjectRef):
+                    return b"__PICKLED_OBJREF__" + pickle.dumps(value)
+                return value
+
+            def serialize_item(item):
+                if isinstance(item, dict):
+                    return {k: serialize_value(v) for k, v in item.items()}
+                return item
+
             if not items:
                 return {}
 
             # Handle RAW_ITEMS format
             if fmt == BatchFormat.RAW_ITEMS:
-                return {"item": items}
+                return {"item": [serialize_item(i) for i in items]}
 
             # Handle LIST_OF_DICTS -> DICT_OF_LISTS conversion
             if isinstance(items[0], dict):
-                keys = items[0].keys()
-                return {k: [item[k] for item in items] for k in keys}
+                serialized_items = [serialize_item(item) for item in items]
+                keys = serialized_items[0].keys()
+                return {k: [item[k] for item in serialized_items] for k in keys}
 
             # Fallback: wrap as raw items
-            return {"item": items}
+            return {"item": [serialize_item(i) for i in items]}
 
         def __del__(self):
             if hasattr(self, "agent"):
