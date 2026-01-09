@@ -674,7 +674,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen/Qwen3-Omni-30B-A3B-Thinking",
+        default="Qwen/Qwen3-Omni-30B-A3B-Instruct",
         help="Model name",
     )
 

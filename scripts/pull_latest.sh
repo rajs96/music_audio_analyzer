@@ -1,13 +1,7 @@
 #!/bin/bash
 # Pull latest code on RunPod instance
-# Usage: ./pull_latest.sh [path_to_repo]
+# Replaces /app/src with latest from GitHub
 
-REPO_PATH="${1:-/workspace/music_audio_analyzer}"
+cd /app && rm -rf src && git clone --depth 1 https://github.com/rajs96/music_audio_analyzer.git /tmp/repo && cp -r /tmp/repo/src . && rm -rf /tmp/repo
 
-cd "$REPO_PATH" || { echo "ERROR: Directory $REPO_PATH not found"; exit 1; }
-
-echo "Pulling latest code in $REPO_PATH..."
-git fetch origin
-git reset --hard origin/main
-
-echo "Done! Latest code pulled."
+echo "Done! Latest src/ pulled from GitHub."
