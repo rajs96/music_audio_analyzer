@@ -147,6 +147,7 @@ class ResultConsumer(threading.Thread):
         except Exception as e:
             logger.error(f"ResultConsumer error: {e}")
             import traceback
+
             traceback.print_exc()
 
         logger.info(f"ResultConsumer finished with {len(self.results)} results")
@@ -323,7 +324,9 @@ def main(
         submit_batch("BATCH 1", batch1_size)
 
         # Wait while GPU processes (consumer thread handles results)
-        logger.info(f"\nWaiting {delay_between_batches_sec}s while GPU processes batch 1...")
+        logger.info(
+            f"\nWaiting {delay_between_batches_sec}s while GPU processes batch 1..."
+        )
         for i in range(delay_between_batches_sec):
             if shutdown_requested.is_set():
                 break
@@ -337,7 +340,9 @@ def main(
         submit_batch("BATCH 2 (LATE)", batch2_size)
 
         # Wait while GPU processes
-        logger.info(f"\nWaiting {delay_between_batches_sec}s while GPU processes batch 2...")
+        logger.info(
+            f"\nWaiting {delay_between_batches_sec}s while GPU processes batch 2..."
+        )
         for i in range(delay_between_batches_sec):
             if shutdown_requested.is_set():
                 break
@@ -375,6 +380,7 @@ def main(
     except Exception as e:
         logger.error(f"Error: {e}")
         import traceback
+
         traceback.print_exc()
 
     # Stop consumer and pipeline
