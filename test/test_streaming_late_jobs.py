@@ -42,7 +42,6 @@ from src.pipelines.instrument_detection.agents.audio_preprocessor import (
 from src.pipelines.instrument_detection.agents.instrument_detector import (
     InstrumentDetectorCoTAgent,
 )
-from src.pipelines.instrument_detection.data_classes import InstrumentDetectJob
 
 # Map string names to torch dtypes
 DTYPE_MAP = {
@@ -96,6 +95,74 @@ def create_job_from_file(filepath: Path) -> dict:
     }
 
 
+class ResultConsumer(threading.Thread):
+    """Thread that consumes results from the streaming iterator."""
+
+    def __init__(self, streaming_iterator, total_expected: int):
+        super().__init__(daemon=True)
+        self.streaming_iterator = streaming_iterator
+        self.total_expected = total_expected
+        self.results = []
+        self.stop_event = threading.Event()
+        self.lock = threading.Lock()
+
+    def run(self):
+        """Consume results from the iterator."""
+        logger.info("ResultConsumer started")
+
+        try:
+            for batch in self.streaming_iterator:
+                if self.stop_event.is_set():
+                    break
+
+                if batch:
+                    keys = list(batch.keys())
+                    if keys:
+                        n_items = len(batch[keys[0]])
+                        for i in range(n_items):
+                            result = {k: batch[k][i] for k in keys}
+
+                            with self.lock:
+                                self.results.append(result)
+                                count = len(self.results)
+
+                            if result.get("error") and str(result.get("error")).strip():
+                                logger.warning(
+                                    f"Result {count}: {result['filename']} -> ERROR: {result['error']}"
+                                )
+                            else:
+                                logger.info(
+                                    f"Result {count}: {result['filename']} -> "
+                                    f"BG: {result.get('background', [])}, "
+                                    f"MG: {result.get('middle_ground', [])}, "
+                                    f"FG: {result.get('foreground', [])}"
+                                )
+
+                # Check if we have all results
+                with self.lock:
+                    if len(self.results) >= self.total_expected:
+                        logger.info("All expected results received!")
+                        break
+
+        except Exception as e:
+            logger.error(f"ResultConsumer error: {e}")
+            import traceback
+            traceback.print_exc()
+
+        logger.info(f"ResultConsumer finished with {len(self.results)} results")
+
+    def stop(self):
+        self.stop_event.set()
+
+    def get_results(self):
+        with self.lock:
+            return list(self.results)
+
+    def get_count(self):
+        with self.lock:
+            return len(self.results)
+
+
 def main(
     # Test config
     data_dir: str = "audio_files",
@@ -141,7 +208,7 @@ def main(
     job_queue = Queue(maxsize=1000)
     logger.info("Job queue created")
 
-    # Create datasource - NO max_items limit so it keeps running
+    # Create datasource
     datasource = QueueStreamingDatasource(
         queue=job_queue,
         item_to_row_fn=lambda x: x,
@@ -225,8 +292,11 @@ def main(
         batch_size=1,
     )
 
-    # Results tracking
-    results = []
+    # Start result consumer thread
+    consumer = ResultConsumer(streaming_iterator, total_jobs)
+    consumer.start()
+
+    # Job submission tracking
     jobs_submitted = 0
     start_time = time.time()
 
@@ -234,9 +304,10 @@ def main(
         nonlocal jobs_submitted
         logger.info(f"\n{'='*60}")
         logger.info(f"SUBMITTING {batch_name}: {num_jobs} jobs")
+        logger.info(f"Current results: {consumer.get_count()}")
         logger.info(f"{'='*60}")
 
-        for i in range(num_jobs):
+        for _ in range(num_jobs):
             audio_file = random.choice(audio_files)
             job = create_job_from_file(audio_file)
             job_queue.put(job)
@@ -245,92 +316,76 @@ def main(
 
         logger.info(f"{batch_name} submitted. Total jobs: {jobs_submitted}")
 
-    def process_results_for_duration(duration_sec: int, check_interval: float = 0.1):
-        """Process results from the iterator for a given duration."""
-        end_time = time.time() + duration_sec
-        batch_results = 0
-
-        while time.time() < end_time and not shutdown_requested.is_set():
-            try:
-                # Non-blocking check - use a short timeout
-                batch = next(streaming_iterator, None)
-
-                if batch:
-                    keys = list(batch.keys())
-                    if keys:
-                        n_items = len(batch[keys[0]])
-                        for i in range(n_items):
-                            result = {k: batch[k][i] for k in keys}
-                            results.append(result)
-                            batch_results += 1
-
-                            if result.get("error") and str(result.get("error")).strip():
-                                logger.warning(
-                                    f"Result {len(results)}: {result['filename']} -> ERROR: {result['error']}"
-                                )
-                            else:
-                                logger.info(
-                                    f"Result {len(results)}: {result['filename']} -> "
-                                    f"BG: {result.get('background', [])}, "
-                                    f"MG: {result.get('middle_ground', [])}, "
-                                    f"FG: {result.get('foreground', [])}"
-                                )
-                else:
-                    time.sleep(check_interval)
-
-            except StopIteration:
-                logger.info("Iterator exhausted")
-                break
-
-        logger.info(
-            f"Processed {batch_results} results in this period. Total: {len(results)}"
-        )
-        return batch_results
-
     try:
         # ============================================
         # BATCH 1: Initial jobs
         # ============================================
         submit_batch("BATCH 1", batch1_size)
 
-        logger.info(f"\nProcessing for {delay_between_batches_sec} seconds...")
-        process_results_for_duration(delay_between_batches_sec)
+        # Wait while GPU processes (consumer thread handles results)
+        logger.info(f"\nWaiting {delay_between_batches_sec}s while GPU processes batch 1...")
+        for i in range(delay_between_batches_sec):
+            if shutdown_requested.is_set():
+                break
+            time.sleep(1)
+            if i > 0 and i % 30 == 0:
+                logger.info(f"  ...{i}s elapsed, {consumer.get_count()} results so far")
 
         # ============================================
         # BATCH 2: Late jobs while GPU is processing
         # ============================================
         submit_batch("BATCH 2 (LATE)", batch2_size)
 
-        logger.info(f"\nProcessing for {delay_between_batches_sec} seconds...")
-        process_results_for_duration(delay_between_batches_sec)
+        # Wait while GPU processes
+        logger.info(f"\nWaiting {delay_between_batches_sec}s while GPU processes batch 2...")
+        for i in range(delay_between_batches_sec):
+            if shutdown_requested.is_set():
+                break
+            time.sleep(1)
+            if i > 0 and i % 30 == 0:
+                logger.info(f"  ...{i}s elapsed, {consumer.get_count()} results so far")
 
         # ============================================
         # BATCH 3: Final batch
         # ============================================
         submit_batch("BATCH 3 (FINAL)", batch3_size)
 
-        # Process remaining until all done
-        logger.info("\nProcessing remaining jobs until complete...")
-        while len(results) < total_jobs and not shutdown_requested.is_set():
-            remaining = total_jobs - len(results)
-            logger.info(f"Waiting for {remaining} more results...")
-            processed = process_results_for_duration(60)  # Check every minute
-            if processed == 0:
-                logger.warning("No results in last minute, continuing to wait...")
+        # Wait for all results
+        logger.info("\nWaiting for all results to complete...")
+        timeout = 600  # 10 minute timeout
+        start_wait = time.time()
+
+        while consumer.get_count() < total_jobs:
+            if shutdown_requested.is_set():
+                break
+            if time.time() - start_wait > timeout:
+                logger.error("Timeout waiting for results!")
+                break
+
+            elapsed = int(time.time() - start_wait)
+            if elapsed > 0 and elapsed % 30 == 0:
+                logger.info(
+                    f"  ...waiting, {consumer.get_count()}/{total_jobs} results "
+                    f"({elapsed}s elapsed)"
+                )
+            time.sleep(1)
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     except Exception as e:
         logger.error(f"Error: {e}")
         import traceback
-
         traceback.print_exc()
 
-    # Cleanup
+    # Stop consumer and pipeline
+    consumer.stop()
     pipeline.stop()
 
     end_time = time.time()
     total_time = end_time - start_time
+
+    # Get final results
+    results = consumer.get_results()
 
     # Final stats
     successful = [
