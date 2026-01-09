@@ -319,21 +319,49 @@ def create_agent_callable(
             """Convert Ray Data batch (dict of columns) to list of items."""
             import pickle  # Local import for serialization safety
 
+            def to_bytes_if_possible(value):
+                """Convert value to bytes if it's a bytes-like type.
+
+                PyArrow can return binary data as various types:
+                - bytes (Python native)
+                - numpy.bytes_
+                - pyarrow.lib.LargeBinaryScalar / BinaryScalar
+
+                This function normalizes them all to Python bytes.
+                """
+                if isinstance(value, bytes):
+                    return value
+                # Handle numpy bytes
+                if hasattr(value, "tobytes"):
+                    return value.tobytes()
+                # Handle PyArrow scalars
+                if hasattr(value, "as_py"):
+                    py_val = value.as_py()
+                    if isinstance(py_val, bytes):
+                        return py_val
+                # Handle memoryview
+                if isinstance(value, memoryview):
+                    return bytes(value)
+                return None  # Not a bytes-like type
+
             def deserialize_row(row):
                 """Deserialize pickled values from PyArrow storage."""
                 deserialized = {}
                 for key, value in row.items():
-                    if isinstance(value, bytes):
-                        if value.startswith(b"__PICKLED_OBJREF__"):
+                    # Try to convert to bytes (handles PyArrow binary scalars, numpy bytes, etc.)
+                    byte_value = to_bytes_if_possible(value)
+
+                    if byte_value is not None:
+                        if byte_value.startswith(b"__PICKLED_OBJREF__"):
                             deserialized[key] = pickle.loads(
-                                value[len(b"__PICKLED_OBJREF__") :]
+                                byte_value[len(b"__PICKLED_OBJREF__") :]
                             )
-                        elif value.startswith(b"__PICKLED__"):
+                        elif byte_value.startswith(b"__PICKLED__"):
                             deserialized[key] = pickle.loads(
-                                value[len(b"__PICKLED__") :]
+                                byte_value[len(b"__PICKLED__") :]
                             )
                         else:
-                            deserialized[key] = value
+                            deserialized[key] = byte_value
                     else:
                         deserialized[key] = value
                 return deserialized

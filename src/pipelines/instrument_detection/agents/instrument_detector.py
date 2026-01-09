@@ -233,9 +233,11 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
     def _get_waveforms_from_items(
         self, items: List[Dict[str, Any]], now: int
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[np.ndarray]]:
-        """Extract waveforms from items, separating valid from errored."""
-        import ray
+        """Extract waveforms from items, separating valid from errored.
 
+        Waveforms are passed as serialized bytes (waveform_bytes) and deserialized
+        using np.frombuffer(). No ray.get() calls needed.
+        """
         results = []
         valid_items = []
         valid_waveforms = []
@@ -243,52 +245,44 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         for idx, item in enumerate(items):
             filename = item.get("filename", f"unknown_{idx}")
 
-            # Debug: log item keys and types to trace data flow
-            logger.debug(
-                f"Item {idx} '{filename}' keys: {list(item.keys())}, "
-                f"waveform_ref type: {type(item.get('waveform_ref'))}, "
-                f"waveform type: {type(item.get('waveform'))}"
-            )
-
             # Check if item has an error from preprocessing
-            if item.get("error"):
+            # Note: PyArrow converts None to nan during serialization, so we need to
+            # check for actual error strings, not just truthy values
+            error_value = item.get("error")
+            has_real_error = (
+                error_value is not None
+                and error_value != "nan"
+                and not (isinstance(error_value, float) and str(error_value) == "nan")
+                and str(error_value).strip() != ""
+            )
+            if has_real_error:
                 logger.warning(
-                    f"Item '{filename}' has preprocessing error: {item['error']}"
+                    f"Item '{filename}' has preprocessing error: {error_value}"
                 )
-                results.append(self._create_error_result(item, now, item["error"]))
+                results.append(self._create_error_result(item, now, str(error_value)))
                 continue
 
-            # Get waveform - handle both waveform_ref (ObjectRef) and inline waveform
+            # Get waveform_bytes and deserialize
             try:
-                waveform = None
+                waveform_bytes = item.get("waveform_bytes")
 
-                if "waveform_ref" in item and item["waveform_ref"] is not None:
-                    waveform_ref = item["waveform_ref"]
-                    logger.debug(
-                        f"Item '{filename}' retrieving waveform_ref: {waveform_ref}"
-                    )
-                    waveform = ray.get(waveform_ref)
-                elif "waveform" in item and item["waveform"] is not None:
-                    waveform = item["waveform"]
-                    logger.debug(f"Item '{filename}' using inline waveform")
-                else:
-                    raise ValueError(
-                        f"No waveform or waveform_ref in item. "
-                        f"Keys: {list(item.keys())}, "
-                        f"waveform_ref={item.get('waveform_ref')}, "
-                        f"waveform={item.get('waveform')}"
-                    )
+                if waveform_bytes is None or len(waveform_bytes) == 0:
+                    raise ValueError("waveform_bytes is None or empty")
 
-                # Validate waveform
-                if waveform is None:
-                    raise ValueError("Waveform is None after retrieval")
-                if not isinstance(waveform, np.ndarray):
-                    raise ValueError(f"Waveform is not ndarray, got {type(waveform)}")
+                # Handle PyArrow binary types - convert to Python bytes if needed
+                if hasattr(waveform_bytes, "as_py"):
+                    waveform_bytes = waveform_bytes.as_py()
+                elif hasattr(waveform_bytes, "tobytes"):
+                    waveform_bytes = waveform_bytes.tobytes()
+
+                # Deserialize bytes to numpy array # note this is necessary! because we can't use "ray.get() and ray.put()" because object store dies during preprocessor actor shutdown.
+                waveform = np.frombuffer(waveform_bytes, dtype=np.float32)
+
                 if waveform.size == 0:
                     raise ValueError("Waveform is empty (size=0)")
 
                 logger.debug(
-                    f"Item '{filename}' waveform valid: shape={waveform.shape}, "
+                    f"Item '{filename}' waveform deserialized: shape={waveform.shape}, "
                     f"dtype={waveform.dtype}"
                 )
 
@@ -296,10 +290,10 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
                 valid_waveforms.append(waveform)
 
             except Exception as e:
-                logger.error(f"Failed to get waveform for '{filename}': {e}")
+                logger.error(f"Failed to deserialize waveform for '{filename}': {e}")
                 results.append(
                     self._create_error_result(
-                        item, now, f"Failed to retrieve waveform: {str(e)}"
+                        item, now, f"Failed to deserialize waveform: {str(e)}"
                     )
                 )
 
@@ -330,7 +324,7 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
             "filename": item["filename"],
             "instruments": parsed.get("instruments", []),
             "detected_at": now,
-            "error": None,
+            "error": "",  # Empty string instead of None to avoid PyArrow nan conversion
         }
 
     def process_batch(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -491,11 +485,15 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
 
     def _parse_instruments(self, prediction: str) -> Dict[str, Any]:
         """Parse the model output to extract layered instrument JSON."""
+        logger.debug(f"Parsing CoT prediction: {prediction[:500]}...")
+
         try:
             start = prediction.find("{")
             end = prediction.rfind("}") + 1
             if start != -1 and end > start:
-                parsed = json.loads(prediction[start:end])
+                json_str = prediction[start:end]
+                logger.debug(f"Extracted JSON: {json_str}")
+                parsed = json.loads(json_str)
 
                 # Extract layers
                 background = parsed.get("background", [])
@@ -507,14 +505,27 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
                     set(background) | set(middle_ground) | set(foreground)
                 )
 
+                logger.info(
+                    f"Parsed instruments - bg: {background}, mid: {middle_ground}, "
+                    f"fg: {foreground}, all: {all_instruments}"
+                )
+
                 return {
                     "background": background,
                     "middle_ground": middle_ground,
                     "foreground": foreground,
                     "instruments": all_instruments,
                 }
+            else:
+                logger.warning(
+                    f"No JSON object found in prediction. "
+                    f"Raw prediction: {prediction[:200]}..."
+                )
         except Exception as e:
-            logger.warning(f"Failed to parse CoT response: {e}")
+            logger.warning(
+                f"Failed to parse CoT response: {e}. "
+                f"Raw prediction: {prediction[:200]}..."
+            )
 
         return {
             "background": [],
@@ -560,7 +571,7 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
             "instruments": parsed.get("instruments", []),
             "planning_response": planning_response,
             "detected_at": now,
-            "error": None,
+            "error": "",  # Empty string instead of None to avoid PyArrow nan conversion
         }
 
     def process_batch(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -602,9 +613,13 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
             for item, planning, final in zip(
                 valid_items, planning_responses, final_responses
             ):
+                logger.info(
+                    f"Planning response for {item['filename']}: {planning[:200]}..."
+                )
+                logger.info(f"Final response for {item['filename']}: {final[:200]}...")
                 parsed = self._parse_instruments(final)
                 results.append(self._create_success_result(item, now, parsed, planning))
 
-                logger.debug(f"Detected instruments for {item['filename']}: {parsed}")
+                logger.info(f"Detected instruments for {item['filename']}: {parsed}")
 
         return results
