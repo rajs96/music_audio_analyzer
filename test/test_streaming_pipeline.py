@@ -88,8 +88,6 @@ def cache_model(
     Download and cache the model locally using save_pretrained.
     Returns the path to the cached model.
     """
-    import torch
-    from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
 
     model_cache_name = model_name.replace("/", "_")
     cache_path = Path(cache_dir) / model_cache_name

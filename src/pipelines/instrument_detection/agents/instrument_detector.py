@@ -2,8 +2,10 @@
 Instrument Detector Agent.
 
 Runs ML inference to detect instruments in preprocessed audio.
+Inherits from BaseVLLMAudioAgent for common vLLM/batch processing logic.
 """
 
+import ast
 import json
 import time
 from typing import Any, Dict, List, Optional, Type
@@ -12,32 +14,13 @@ import numpy as np
 import torch
 from loguru import logger
 
-from src.streaming_pipeline import Agent
+from src.base_agents import BaseVLLMAudioAgent
 from src.models.qwen_instrument_detector import (
     QwenOmniInstrumentDetector,
     QwenOmniCoTInstrumentDetector,
 )
 
-# Default generation kwargs (HuggingFace)
-DEFAULT_GENERATE_KWARGS = {
-    "max_new_tokens": 256,
-    "do_sample": False,
-    "return_audio": False,
-}
 
-DEFAULT_COT_PLANNING_GENERATE_KWARGS = {
-    "max_new_tokens": 256,
-    "do_sample": False,
-    "return_audio": False,
-}
-
-DEFAULT_COT_RESPONSE_GENERATE_KWARGS = {
-    "max_new_tokens": 128,
-    "do_sample": False,
-    "return_audio": False,
-}
-
-# Default sampling kwargs (vLLM)
 DEFAULT_VLLM_SAMPLING_KWARGS = {
     "temperature": 0.0,
     "max_tokens": 256,
@@ -54,12 +37,12 @@ DEFAULT_VLLM_COT_RESPONSE_KWARGS = {
 }
 
 
-class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
+class InstrumentDetectorAgent(BaseVLLMAudioAgent):
     """
     Agent that runs instrument detection on preprocessed audio.
 
     Uses QwenOmniInstrumentDetector for model loading and inference.
-    The model is loaded once in setup() and reused for all batches.
+    Inherits vLLM/batch processing logic from BaseVLLMAudioAgent.
 
     Input format:
         {
@@ -67,7 +50,7 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
             "song_id": str,
             "song_hash": str,
             "filename": str,
-            "waveform": np.ndarray,
+            "waveform_bytes": bytes,
         }
 
     Output format:
@@ -81,145 +64,14 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
         }
     """
 
-    # Detector class to use
     DETECTOR_CLS: Type[QwenOmniInstrumentDetector] = QwenOmniInstrumentDetector
 
-    def __init__(
-        self,
-        model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct",
-        dtype: torch.dtype = torch.bfloat16,
-        generate_kwargs: Optional[Dict[str, Any]] = None,
-        # vLLM options
-        use_vllm: bool = False,
-        sampling_kwargs: Optional[Dict[str, Any]] = None,
-        tensor_parallel_size: Optional[int] = None,
-        pipeline_parallel_size: int = 1,
-        distributed_executor_backend: str = "mp",
-        gpu_memory_utilization: float = 0.95,
-        max_model_len: int = 32768,
-        max_num_seqs: int = 8,
-    ):
-        super().__init__()
-        self.model_name = model_name
-        self.dtype = dtype
-        self.use_vllm = use_vllm
+    def get_default_sampling_kwargs(self) -> Dict[str, Any]:
+        """Return default vLLM sampling parameters for instrument detection."""
+        return DEFAULT_VLLM_SAMPLING_KWARGS.copy()
 
-        # HF kwargs
-        self.generate_kwargs = generate_kwargs or DEFAULT_GENERATE_KWARGS.copy()
-
-        # vLLM kwargs
-        self.sampling_kwargs = sampling_kwargs or DEFAULT_VLLM_SAMPLING_KWARGS.copy()
-        self.tensor_parallel_size = tensor_parallel_size
-        self.pipeline_parallel_size = pipeline_parallel_size
-        self.distributed_executor_backend = distributed_executor_backend
-        self.gpu_memory_utilization = gpu_memory_utilization
-        self.max_model_len = max_model_len
-        self.max_num_seqs = max_num_seqs
-
-        # Will be initialized in setup()
-        self.detector: QwenOmniInstrumentDetector = None
-
-        # Timing metrics
-        self.total_inference_time_ms = 0.0
-        self.batch_count = 0
-        self.processed_count = 0
-
-    def setup(self) -> None:
-        """Load the detector - called once per actor."""
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        backend = "vLLM" if self.use_vllm else "HuggingFace"
-        logger.info(
-            f"{self.__class__.__name__} loading detector {self.model_name} "
-            f"on {device} with dtype={self.dtype}, backend={backend}"
-        )
-
-        if self.use_vllm:
-            logger.info(
-                f"vLLM config: tp={self.tensor_parallel_size}, pp={self.pipeline_parallel_size}, "
-                f"backend={self.distributed_executor_backend}"
-            )
-            self.detector = self.DETECTOR_CLS(
-                model_name=self.model_name,
-                dtype=self.dtype,
-                use_vllm=True,
-                tensor_parallel_size=self.tensor_parallel_size,
-                pipeline_parallel_size=self.pipeline_parallel_size,
-                distributed_executor_backend=self.distributed_executor_backend,
-                gpu_memory_utilization=self.gpu_memory_utilization,
-                max_model_len=self.max_model_len,
-                max_num_seqs=self.max_num_seqs,
-            )
-        else:
-            self.detector = self.DETECTOR_CLS(
-                model_name=self.model_name,
-                dtype=self.dtype,
-                device=device,
-            )
-        logger.info(f"{self.__class__.__name__} detector loaded ({backend})")
-
-    def teardown(self) -> None:
-        """Clean up detector resources."""
-        if self.detector is not None:
-            self.detector.unload()
-            self.detector = None
-            logger.info(f"{self.__class__.__name__} cleaned up")
-
-    def tokenize(self, waveforms: List[np.ndarray]) -> Dict[str, Any]:
-        """Convert waveforms to model inputs using detector's dataset conversation builder."""
-        conversations = [
-            self.detector.DATASET_CLS.get_conversation(waveform)
-            for waveform in waveforms
-        ]
-
-        inputs = self.detector.processor.apply_chat_template(
-            conversations,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_tensors="pt",
-            return_dict=True,
-        )
-        return inputs
-
-    def process_hf_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        """Move inputs to device with correct dtype."""
-        processed_inputs = {}
-        for k, v in inputs.items():
-            if isinstance(v, torch.Tensor):
-                if v.is_floating_point():
-                    processed_inputs[k] = v.to(
-                        device=self.detector.device, dtype=self.dtype
-                    )
-                else:
-                    processed_inputs[k] = v.to(device=self.detector.device)
-            else:
-                processed_inputs[k] = v
-        return processed_inputs
-
-    def predict_batch_internal(self, waveforms: List[np.ndarray]) -> List[str]:
-        """Run inference on a batch of waveforms using detector."""
-        if self.use_vllm:
-            # vLLM: pass waveforms directly with sampling kwargs
-            responses = self.detector.generate(
-                waveforms=waveforms,
-                sampling_kwargs=self.sampling_kwargs,
-            )
-        else:
-            # HF: tokenize first, then generate
-            inputs = self.tokenize(waveforms)
-            processed_inputs = self.process_hf_inputs(inputs)
-
-            with torch.no_grad():
-                responses = self.detector.generate(
-                    inputs=processed_inputs,
-                    generate_kwargs=self.generate_kwargs,
-                )
-
-        return responses
-
-    def _parse_instruments(self, prediction: str) -> Dict[str, Any]:
+    def parse_output(self, prediction: str) -> Dict[str, Any]:
         """Parse the model output to extract instrument list."""
-        import ast
-
         try:
             start = prediction.find("[")
             end = prediction.rfind("]") + 1
@@ -230,168 +82,29 @@ class InstrumentDetectorAgent(Agent[Dict[str, Any], Dict[str, Any]]):
             pass
         return {"instruments": [prediction.strip()]}
 
-    def _get_waveforms_from_items(
-        self, items: List[Dict[str, Any]], now: int
-    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[np.ndarray]]:
-        """Extract waveforms from items, separating valid from errored.
-
-        Waveforms are passed as serialized bytes (waveform_bytes) and deserialized
-        using np.frombuffer(). No ray.get() calls needed.
-        """
-        results = []
-        valid_items = []
-        valid_waveforms = []
-
-        for idx, item in enumerate(items):
-            filename = item.get("filename", f"unknown_{idx}")
-
-            # Check if item has an error from preprocessing
-            # Note: PyArrow converts None to nan during serialization, so we need to
-            # check for actual error strings, not just truthy values
-            error_value = item.get("error")
-            has_real_error = (
-                error_value is not None
-                and error_value != "nan"
-                and not (isinstance(error_value, float) and str(error_value) == "nan")
-                and str(error_value).strip() != ""
-            )
-            if has_real_error:
-                logger.warning(
-                    f"Item '{filename}' has preprocessing error: {error_value}"
-                )
-                results.append(self._create_error_result(item, now, str(error_value)))
-                continue
-
-            # Get waveform_bytes and deserialize
-            try:
-                waveform_bytes = item.get("waveform_bytes")
-
-                if waveform_bytes is None or len(waveform_bytes) == 0:
-                    raise ValueError("waveform_bytes is None or empty")
-
-                # Handle PyArrow binary types - convert to Python bytes if needed
-                if hasattr(waveform_bytes, "as_py"):
-                    waveform_bytes = waveform_bytes.as_py()
-                elif hasattr(waveform_bytes, "tobytes"):
-                    waveform_bytes = waveform_bytes.tobytes()
-
-                # Deserialize bytes to numpy array # note this is necessary! because we can't use "ray.get() and ray.put()" because object store dies during preprocessor actor shutdown.
-                waveform = np.frombuffer(waveform_bytes, dtype=np.float32)
-
-                if waveform.size == 0:
-                    raise ValueError("Waveform is empty (size=0)")
-
-                logger.debug(
-                    f"Item '{filename}' waveform deserialized: shape={waveform.shape}, "
-                    f"dtype={waveform.dtype}"
-                )
-
-                valid_items.append(item)
-                valid_waveforms.append(waveform)
-
-            except Exception as e:
-                logger.error(f"Failed to deserialize waveform for '{filename}': {e}")
-                results.append(
-                    self._create_error_result(
-                        item, now, f"Failed to deserialize waveform: {str(e)}"
-                    )
-                )
-
-        return results, valid_items, valid_waveforms
-
-    def _create_error_result(
-        self, item: Dict[str, Any], now: int, error: str
-    ) -> Dict[str, Any]:
-        """Create an error result for an item."""
+    def get_success_fields(self, parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """Return instrument detection specific fields for success result."""
         return {
-            "job_id": item["job_id"],
-            "song_id": item["song_id"],
-            "song_hash": item["song_hash"],
-            "filename": item["filename"],
-            "instruments": [],
-            "detected_at": now,
-            "error": error,
-        }
-
-    def _create_success_result(
-        self, item: Dict[str, Any], now: int, parsed: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Create a success result for an item."""
-        return {
-            "job_id": item["job_id"],
-            "song_id": item["song_id"],
-            "song_hash": item["song_hash"],
-            "filename": item["filename"],
             "instruments": parsed.get("instruments", []),
-            "detected_at": now,
-            "error": "",  # Empty string instead of None to avoid PyArrow nan conversion
         }
 
-    def process_batch(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Process a batch of preprocessed audio through the detector."""
-        if not items:
-            return []
-
-        now = int(time.time())
-
-        # Extract waveforms, separating errors
-        results, valid_items, valid_waveforms = self._get_waveforms_from_items(
-            items, now
-        )
-
-        # Run inference on valid items
-        if valid_waveforms:
-            inference_start = time.time()
-            predictions = self.predict_batch_internal(valid_waveforms)
-            inference_time_ms = (time.time() - inference_start) * 1000
-
-            # Update metrics
-            self.total_inference_time_ms += inference_time_ms
-            self.batch_count += 1
-            self.processed_count += len(valid_items)
-
-            logger.info(
-                f"Batch inference: {inference_time_ms:.1f}ms "
-                f"({inference_time_ms/len(valid_items):.1f}ms/example)"
-            )
-
-            # Create results for valid items
-            for item, prediction in zip(valid_items, predictions):
-                parsed = self._parse_instruments(prediction)
-                results.append(self._create_success_result(item, now, parsed))
-
-                logger.debug(f"Detected instruments for {item['filename']}: {parsed}")
-
-        return results
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get timing statistics."""
-        avg_batch_time_ms = (
-            self.total_inference_time_ms / self.batch_count
-            if self.batch_count > 0
-            else 0.0
-        )
-        avg_per_example_ms = (
-            self.total_inference_time_ms / self.processed_count
-            if self.processed_count > 0
-            else 0.0
-        )
+    def get_error_fields(self) -> Dict[str, Any]:
+        """Return default instrument detection fields for error result."""
         return {
-            "processed_count": self.processed_count,
-            "batch_count": self.batch_count,
-            "total_inference_time_ms": self.total_inference_time_ms,
-            "avg_batch_time_ms": avg_batch_time_ms,
-            "avg_per_example_ms": avg_per_example_ms,
+            "instruments": [],
         }
 
 
-class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
+class InstrumentDetectorCoTAgent(BaseVLLMAudioAgent):
     """
     Agent that runs chain-of-thought instrument detection on preprocessed audio.
 
     Uses QwenOmniCoTInstrumentDetector for two-step reasoning:
     1. Describe sounds in background/middle-ground/foreground layers
     2. Convert descriptions to structured JSON with instruments
+
+    This agent overrides process_batch because it has two-step inference
+    (planning + response) which differs from the single-step base class.
 
     Output format includes layer-based instruments:
         {
@@ -408,15 +121,12 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
         }
     """
 
-    # Override detector class for CoT
     DETECTOR_CLS: Type[QwenOmniCoTInstrumentDetector] = QwenOmniCoTInstrumentDetector
 
     def __init__(
         self,
         model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         dtype: torch.dtype = torch.bfloat16,
-        planning_generate_kwargs: Optional[Dict[str, Any]] = None,
-        response_generate_kwargs: Optional[Dict[str, Any]] = None,
         # vLLM options
         use_vllm: bool = False,
         planning_sampling_kwargs: Optional[Dict[str, Any]] = None,
@@ -428,7 +138,6 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
         max_model_len: int = 32768,
         max_num_seqs: int = 8,
     ):
-        # Call parent with vLLM options
         super().__init__(
             model_name=model_name,
             dtype=dtype,
@@ -441,15 +150,6 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
             max_num_seqs=max_num_seqs,
         )
 
-        # HF kwargs
-        self.planning_generate_kwargs = (
-            planning_generate_kwargs or DEFAULT_COT_PLANNING_GENERATE_KWARGS.copy()
-        )
-        self.response_generate_kwargs = (
-            response_generate_kwargs or DEFAULT_COT_RESPONSE_GENERATE_KWARGS.copy()
-        )
-
-        # vLLM kwargs
         self.planning_sampling_kwargs = (
             planning_sampling_kwargs or DEFAULT_VLLM_COT_PLANNING_KWARGS.copy()
         )
@@ -457,33 +157,10 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
             response_sampling_kwargs or DEFAULT_VLLM_COT_RESPONSE_KWARGS.copy()
         )
 
-    def predict_batch_internal(
-        self, waveforms: List[np.ndarray]
-    ) -> tuple[List[str], List[str]]:
-        """Run two-step CoT inference on a batch of waveforms using detector."""
-        if self.use_vllm:
-            # vLLM: pass waveforms directly with sampling kwargs
-            planning_responses, final_responses = self.detector.generate(
-                waveforms=waveforms,
-                planning_sampling_kwargs=self.planning_sampling_kwargs,
-                response_sampling_kwargs=self.response_sampling_kwargs,
-            )
-        else:
-            # HF: tokenize first, then generate
-            inputs = self.tokenize(waveforms)
-            processed_inputs = self.process_hf_inputs(inputs)
+    def get_default_sampling_kwargs(self) -> Dict[str, Any]:
+        return DEFAULT_VLLM_COT_PLANNING_KWARGS.copy()
 
-            with torch.no_grad():
-                planning_responses, final_responses = self.detector.generate(
-                    waveforms=waveforms,
-                    inputs=processed_inputs,
-                    planning_generate_kwargs=self.planning_generate_kwargs,
-                    response_generate_kwargs=self.response_generate_kwargs,
-                )
-
-        return planning_responses, final_responses
-
-    def _parse_instruments(self, prediction: str) -> Dict[str, Any]:
+    def parse_output(self, prediction: str) -> Dict[str, Any]:
         """Parse the model output to extract layered instrument JSON."""
         logger.debug(f"Parsing CoT prediction: {prediction[:500]}...")
 
@@ -534,61 +211,47 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
             "instruments": [],
         }
 
-    def _create_error_result(
-        self, item: Dict[str, Any], now: int, error: str
-    ) -> Dict[str, Any]:
-        """Create an error result for an item with CoT fields."""
+    def get_success_fields(self, parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """Return CoT-specific fields for success result."""
         return {
-            "job_id": item["job_id"],
-            "song_id": item["song_id"],
-            "song_hash": item["song_hash"],
-            "filename": item["filename"],
+            "background": parsed.get("background", []),
+            "middle_ground": parsed.get("middle_ground", []),
+            "foreground": parsed.get("foreground", []),
+            "instruments": parsed.get("instruments", []),
+            "planning_response": parsed.get("planning_response", ""),
+        }
+
+    def get_error_fields(self) -> Dict[str, Any]:
+        """Return default CoT fields for error result."""
+        return {
             "background": [],
             "middle_ground": [],
             "foreground": [],
             "instruments": [],
             "planning_response": "",
-            "detected_at": now,
-            "error": error,
         }
 
-    def _create_success_result(
-        self,
-        item: Dict[str, Any],
-        now: int,
-        parsed: Dict[str, Any],
-        planning_response: str = "",
-    ) -> Dict[str, Any]:
-        """Create a success result for an item with CoT fields."""
-        return {
-            "job_id": item["job_id"],
-            "song_id": item["song_id"],
-            "song_hash": item["song_hash"],
-            "filename": item["filename"],
-            "background": parsed.get("background", []),
-            "middle_ground": parsed.get("middle_ground", []),
-            "foreground": parsed.get("foreground", []),
-            "instruments": parsed.get("instruments", []),
-            "planning_response": planning_response,
-            "detected_at": now,
-            "error": "",  # Empty string instead of None to avoid PyArrow nan conversion
-        }
+    def predict_batch_internal(
+        self, waveforms: List[np.ndarray]
+    ) -> tuple[List[str], List[str]]:
+        planning_responses, final_responses = self.detector.generate(
+            waveforms=waveforms,
+            planning_sampling_kwargs=self.planning_sampling_kwargs,
+            response_sampling_kwargs=self.response_sampling_kwargs,
+        )
+        return planning_responses, final_responses
 
     def process_batch(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Process a batch of preprocessed audio through the CoT detector."""
         logger.info(f"InstrumentDetectorCoT received batch of {len(items)} items")
         if not items:
             return []
 
         now = int(time.time())
-
-        # Extract waveforms, separating errors
         results, valid_items, valid_waveforms = self._get_waveforms_from_items(
             items, now
         )
         logger.info(f"Extracted {len(valid_waveforms)} valid waveforms from batch")
 
-        # Run inference on valid items
         if valid_waveforms:
             logger.info(
                 f"Starting vLLM inference on {len(valid_waveforms)} waveforms..."
@@ -598,8 +261,6 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
                 valid_waveforms
             )
             inference_time_ms = (time.time() - inference_start) * 1000
-
-            # Update metrics
             self.total_inference_time_ms += inference_time_ms
             self.batch_count += 1
             self.processed_count += len(valid_items)
@@ -609,7 +270,6 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
                 f"({inference_time_ms/len(valid_items):.1f}ms/example)"
             )
 
-            # Create results for valid items
             for item, planning, final in zip(
                 valid_items, planning_responses, final_responses
             ):
@@ -617,8 +277,10 @@ class InstrumentDetectorCoTAgent(InstrumentDetectorAgent):
                     f"Planning response for {item['filename']}: {planning[:200]}..."
                 )
                 logger.info(f"Final response for {item['filename']}: {final[:200]}...")
-                parsed = self._parse_instruments(final)
-                results.append(self._create_success_result(item, now, parsed, planning))
+
+                parsed = self.parse_output(final)
+                parsed["planning_response"] = planning
+                results.append(self._create_success_result(item, now, parsed))
 
                 logger.info(f"Detected instruments for {item['filename']}: {parsed}")
 
