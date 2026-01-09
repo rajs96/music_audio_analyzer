@@ -154,9 +154,11 @@ def main(
     models_dir: str = DEFAULT_MODELS_DIR,
     dtype: torch.dtype = torch.bfloat16,
     tensor_parallel_size: int = 1,
+    distributed_executor_backend: str = "mp",
     gpu_memory_utilization: float = 0.90,
     max_model_len: int = 32768,
     max_num_seqs: int = 8,
+    detector_actors: int = 1,
     detector_batch_size: int = 4,
     preprocessor_actors: int = 4,
     preprocessor_batch_size: int = 8,
@@ -226,12 +228,13 @@ def main(
             dtype=dtype,
             use_vllm=True,
             tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=max_model_len,
             max_num_seqs=max_num_seqs,
         ),
         config=AgentRayComputeConfig(
-            num_actors=1,
+            num_actors=detector_actors,
             batch_size=detector_batch_size,
             num_gpus=float(tensor_parallel_size),
             tensor_parallel_size=tensor_parallel_size,
@@ -426,6 +429,13 @@ if __name__ == "__main__":
         help="Tensor parallel size",
     )
     parser.add_argument(
+        "--distributed-executor-backend",
+        type=str,
+        default="mp",
+        choices=["mp", "ray"],
+        help="vLLM distributed executor backend (use 'ray' for TP>1 inside Ray)",
+    )
+    parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
         default=0.90,
@@ -442,6 +452,12 @@ if __name__ == "__main__":
         type=int,
         default=8,
         help="Max number of sequences for vLLM",
+    )
+    parser.add_argument(
+        "--detector-actors",
+        type=int,
+        default=1,
+        help="Number of detector actors (model replicas)",
     )
     parser.add_argument(
         "--detector-batch",
@@ -477,9 +493,11 @@ Eval Benchmark Configuration:
   Model: {args.model}
   Dtype: {args.dtype}
   Tensor Parallel: {args.tensor_parallel_size}
+  Distributed Backend: {args.distributed_executor_backend}
   GPU Memory: {args.gpu_memory_utilization}
   Max Model Len: {args.max_model_len}
   Max Num Seqs: {args.max_num_seqs}
+  Detector Actors: {args.detector_actors}
   Detector Batch: {args.detector_batch}
   Preprocessor Actors: {args.preprocessor_actors}
   Preprocessor Batch: {args.preprocessor_batch}
@@ -492,9 +510,11 @@ Eval Benchmark Configuration:
         models_dir=args.models_dir,
         dtype=DTYPE_MAP[args.dtype],
         tensor_parallel_size=args.tensor_parallel_size,
+        distributed_executor_backend=args.distributed_executor_backend,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
         max_num_seqs=args.max_num_seqs,
+        detector_actors=args.detector_actors,
         detector_batch_size=args.detector_batch,
         preprocessor_actors=args.preprocessor_actors,
         preprocessor_batch_size=args.preprocessor_batch,
