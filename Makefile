@@ -113,39 +113,6 @@ push_vllm_h100_ghcr_image: login_ghcr build_vllm_h100
 	docker push $(GHCR_VLLM_H100_FULL_TAG)
 	@echo "Pushed image: $(GHCR_VLLM_H100_FULL_TAG)"
 
-build_vllm_flash:
-	docker buildx build \
-		--platform linux/amd64 \
-		-f Dockerfile_vllm_flash \
-		-t $(VLLM_FLASH_FULL_TAG) \
-		.
-
-	@echo "Built image: $(VLLM_FLASH_FULL_TAG)"
-
-push_vllm_flash_image: login build_vllm_flash
-	docker push $(VLLM_FLASH_FULL_TAG)
-
-push_vllm_flash_ghcr_image: login_ghcr build_vllm_flash
-	docker tag $(VLLM_FLASH_FULL_TAG) $(GHCR_VLLM_FLASH_FULL_TAG)
-	docker push $(GHCR_VLLM_FLASH_FULL_TAG)
-	@echo "Pushed image: $(GHCR_VLLM_FLASH_FULL_TAG)"
-
-build_preprocessor:
-	docker buildx build \
-		--platform linux/amd64 \
-		-f Dockerfile_preprocessor \
-		-t $(PREPROCESSOR_FULL_TAG) \
-		.
-
-	@echo "Built image: $(PREPROCESSOR_FULL_TAG)"
-
-push_preprocessor_image: login build_preprocessor
-	docker push $(PREPROCESSOR_FULL_TAG)
-
-push_preprocessor_ghcr_image: login_ghcr build_preprocessor
-	docker tag $(PREPROCESSOR_FULL_TAG) $(GHCR_PREPROCESSOR_FULL_TAG)
-	docker push $(GHCR_PREPROCESSOR_FULL_TAG)
-	@echo "Pushed image: $(GHCR_PREPROCESSOR_FULL_TAG)"
 
 format:
 	black .
