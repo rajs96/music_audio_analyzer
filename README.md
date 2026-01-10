@@ -137,12 +137,3 @@ Foreground (melodic, prominent):
 Smooth male lead vocal rapping in Portuguese, with melodic ad-libs and vocal layering during
 the chorus, creating a prominent and rhythmic vocal presence.
 ```
-
-### Troubleshooting
-
-If GPU memory is already in use from a previous run:
-```bash
-nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9
-```
-
-TODO: Stem splitting based on instrument descriptions
