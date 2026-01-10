@@ -75,6 +75,69 @@ Sample successful results:
 Performance on H100 (once model is loaded):
 - vLLM throughput: ~5000 toks/s input, ~80 toks/s output
 
+## Multi-GPU Benchmark
+
+Tested on 916 popular songs across diverse genres (classical, hip-hop, electronic, R&B, rock, etc.) using 4x H100 GPUs:
+
+```bash
+python test/test_eval_benchmark.py \
+  --tensor-parallel-size 1 \
+  --detector-actors 4 \
+  --gpu-memory-utilization 0.9 \
+  --detector-batch 4 \
+  --preprocessor-actors 32 \
+  --preprocessor-batch 4
+```
+
+**Throughput:** ~1 file/second (0.96 files/sec to be exact).
+
+### Example Outputs
+
+The chain-of-thought agent first generates a natural language description, then extracts structured JSON.
+
+**Classical - Mozart Requiem:**
+```json
+{
+  "background": ["organ pedal tones"],
+  "middle_ground": ["organ chords", "string textures"],
+  "foreground": ["choir", "soprano", "tenor"]
+}
+```
+Chain-of-thought planning response:
+```
+Background (low-end, rhythm):
+Deep, sustained organ pedal tones providing a low-end foundation, with no percussive elements.
+
+Middle-ground (harmonic, textural):
+Layered organ chords and string textures creating lush, evolving harmonies.
+
+Foreground (melodic, prominent):
+A choir with soprano and tenor voices carrying the melodic line.
+```
+
+**Hip-Hop/Latin - Argentina:**
+```json
+{
+  "background": ["sub bass", "808 kick", "hi-hats", "snare"],
+  "middle_ground": ["synth pad", "arpeggiated synth", "synth stabs"],
+  "foreground": ["male lead vocal", "vocal ad-libs"]
+}
+```
+Chain-of-thought planning response:
+```
+Background (low-end, rhythm):
+Deep sub bass with a steady, pulsing rhythm, punchy kick drum on the downbeats, crisp hi-hats
+with a syncopated pattern, and a rhythmic snare/clap on the backbeat.
+
+Middle-ground (harmonic, textural):
+Smooth synth pad providing harmonic texture, layered with atmospheric synth stabs and subtle
+arpeggiated synth lines that add rhythmic movement.
+
+Foreground (melodic, prominent):
+Smooth male lead vocal rapping in Portuguese, with melodic ad-libs and vocal layering during
+the chorus, creating a prominent and rhythmic vocal presence.
+```
+
 ### Troubleshooting
 
 If GPU memory is already in use from a previous run:
